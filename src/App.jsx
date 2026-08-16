@@ -505,20 +505,23 @@ function LocationsTab({ store }) {
   return (
     <div>
       <div className="row-form">
-        <input placeholder="Название точки (напр. AFRO)" value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && add()} />
+        <input placeholder="Название точки (напр. AFRO)" value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && add()} autoFocus />
         <button className="btn primary" onClick={add}>Добавить точку</button>
       </div>
-      <table className="data-table">
-        <thead><tr><th>Название</th><th></th></tr></thead>
-        <tbody>
-          {locations.map((l) => (
-            <tr key={l.id}>
-              <td><input defaultValue={l.name} onBlur={(e) => e.target.value !== l.name && rename(l.id, e.target.value)} style={{ border: 'none', background: 'transparent', font: 'inherit', width: '100%' }} /></td>
-              <td><button className="del-link" onClick={() => remove(l.id)}>удалить</button></td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+      <div className="table-scroll">
+        <table className="data-table">
+          <thead><tr><th>Название</th><th></th></tr></thead>
+          <tbody>
+            {locations.map((l) => (
+              <tr key={l.id}>
+                <td><input defaultValue={l.name} onBlur={(e) => e.target.value !== l.name && rename(l.id, e.target.value)} style={{ border: 'none', background: 'transparent', font: 'inherit', width: '100%' }} /></td>
+                <td><button className="del-link" onClick={() => remove(l.id)}>удалить</button></td>
+              </tr>
+            ))}
+            {locations.length === 0 && <tr><td colSpan={2} style={{ color: 'var(--ink-soft)', textAlign: 'center', padding: 20 }}>Точек пока нет — добавьте первую выше</td></tr>}
+          </tbody>
+        </table>
+      </div>
     </div>
   )
 }
@@ -542,34 +545,65 @@ function SuppliersTab({ store }) {
     reload()
   }
 
+  function onKeyDown(e) { if (e.key === 'Enter') add() }
+
   return (
     <div>
       <div className="row-form">
-        <input placeholder="Поставщик" value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} />
-        <input placeholder="Контакты" value={form.contact} onChange={(e) => setForm((f) => ({ ...f, contact: e.target.value }))} />
-        <input placeholder="Примечание (напр. с кассы)" value={form.note} onChange={(e) => setForm((f) => ({ ...f, note: e.target.value }))} />
+        <input placeholder="Поставщик" value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} onKeyDown={onKeyDown} autoFocus />
+        <input placeholder="Контакты" value={form.contact} onChange={(e) => setForm((f) => ({ ...f, contact: e.target.value }))} onKeyDown={onKeyDown} />
+        <input placeholder="Примечание (напр. с кассы)" value={form.note} onChange={(e) => setForm((f) => ({ ...f, note: e.target.value }))} onKeyDown={onKeyDown} />
         <button className="btn primary" onClick={add}>Добавить</button>
       </div>
-      <table className="data-table">
-        <thead><tr><th>Поставщик</th><th>Контакты</th><th>Примечание</th><th></th></tr></thead>
-        <tbody>
-          {suppliers.map((s) => (
-            <tr key={s.id}>
-              <td><input defaultValue={s.name} onBlur={(e) => e.target.value !== s.name && update(s.id, 'name', e.target.value)} style={{ border: 'none', background: 'transparent', font: 'inherit', width: '100%' }} /></td>
-              <td><input defaultValue={s.contact} onBlur={(e) => e.target.value !== s.contact && update(s.id, 'contact', e.target.value)} style={{ border: 'none', background: 'transparent', font: 'inherit', width: '100%' }} /></td>
-              <td><input defaultValue={s.note} onBlur={(e) => e.target.value !== s.note && update(s.id, 'note', e.target.value)} style={{ border: 'none', background: 'transparent', font: 'inherit', width: '100%' }} /></td>
-              <td><button className="del-link" onClick={() => remove(s.id)}>удалить</button></td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+      <div className="table-scroll">
+        <table className="data-table">
+          <thead><tr><th>Поставщик</th><th>Контакты</th><th>Примечание</th><th></th></tr></thead>
+          <tbody>
+            {suppliers.map((s) => (
+              <tr key={s.id}>
+                <td><input defaultValue={s.name} onBlur={(e) => e.target.value !== s.name && update(s.id, 'name', e.target.value)} style={{ border: 'none', background: 'transparent', font: 'inherit', width: '100%' }} /></td>
+                <td><input defaultValue={s.contact} onBlur={(e) => e.target.value !== s.contact && update(s.id, 'contact', e.target.value)} style={{ border: 'none', background: 'transparent', font: 'inherit', width: '100%' }} /></td>
+                <td><input defaultValue={s.note} onBlur={(e) => e.target.value !== s.note && update(s.id, 'note', e.target.value)} style={{ border: 'none', background: 'transparent', font: 'inherit', width: '100%' }} /></td>
+                <td><button className="del-link" onClick={() => remove(s.id)}>удалить</button></td>
+              </tr>
+            ))}
+            {suppliers.length === 0 && <tr><td colSpan={4} style={{ color: 'var(--ink-soft)', textAlign: 'center', padding: 20 }}>Поставщиков пока нет — добавьте первого выше</td></tr>}
+          </tbody>
+        </table>
+      </div>
     </div>
   )
 }
 
+const COMMON_UNITS = ['шт', 'кг', 'л', 'упк', 'уп', 'пачка', 'г', 'мл', 'ящик']
+const emptyProductForm = { name: '', supplier_id: '', category: '', unit: 'шт', price: '', payment_note: '' }
+
 function ProductsTab({ store }) {
   const { products, suppliers, reload } = store
-  const [form, setForm] = useState({ name: '', supplier_id: '', category: '', unit: 'шт', price: '', payment_note: '' })
+  const [form, setForm] = useState(emptyProductForm)
+  const [importStatus, setImportStatus] = useState(null)
+  const nameInputRef = useRef(null)
+  const fileInputRef = useRef(null)
+
+  const categories = useMemo(
+    () => [...new Set(products.map((p) => p.category).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'ru')),
+    [products]
+  )
+  const units = useMemo(
+    () => [...new Set([...COMMON_UNITS, ...products.map((p) => p.unit).filter(Boolean)])],
+    [products]
+  )
+  const supplierById = useMemo(() => Object.fromEntries(suppliers.map((s) => [s.id, s])), [suppliers])
+
+  function handleSupplierChange(supplierId) {
+    setForm((f) => ({
+      ...f,
+      supplier_id: supplierId,
+      // Auto-fill the payment note from the supplier's default note so it
+      // doesn't need to be retyped for every product — still editable.
+      payment_note: f.payment_note || supplierById[supplierId]?.note || f.payment_note,
+    }))
+  }
 
   async function add() {
     if (!form.name.trim()) return
@@ -581,7 +615,8 @@ function ProductsTab({ store }) {
         sort_order: products.length,
       })
     }
-    setForm({ name: '', supplier_id: '', category: '', unit: 'шт', price: '', payment_note: '' })
+    setForm(emptyProductForm)
+    nameInputRef.current?.focus()
     reload()
   }
   async function remove(id) {
@@ -592,40 +627,118 @@ function ProductsTab({ store }) {
     if (supabaseReady) await supabase.from('products').update({ [field]: value }).eq('id', id)
     reload()
   }
+  function duplicateToForm(p) {
+    setForm({
+      name: p.name + ' (копия)',
+      supplier_id: p.supplier_id || '',
+      category: p.category || '',
+      unit: p.unit || 'шт',
+      price: p.price ?? '',
+      payment_note: p.payment_note || '',
+    })
+    nameInputRef.current?.focus()
+    nameInputRef.current?.select()
+  }
+  function onKeyDown(e) { if (e.key === 'Enter') add() }
+
+  // Bulk import from CSV: name,category,unit,price,supplier,payment_note
+  // Lets a large price list be filled in one go instead of typing every
+  // product by hand.
+  function downloadTemplate() {
+    const csv = 'name,category,unit,price,supplier,payment_note\nСалфетки 24*24,Салфетки,шт,124,Карина,оплата с кассы\n'
+    const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url; a.download = 'шаблон_товаров.csv'; a.click()
+    URL.revokeObjectURL(url)
+  }
+  function parseCsv(text) {
+    const lines = text.split(/\r?\n/).filter((l) => l.trim().length)
+    if (!lines.length) return []
+    const rows = lines.map((line) => line.split(',').map((c) => c.trim().replace(/^"|"$/g, '')))
+    const header = rows[0].map((h) => h.toLowerCase())
+    return rows.slice(1).map((cols) => Object.fromEntries(header.map((h, i) => [h, cols[i] || ''])))
+  }
+  async function importCsvFile(file) {
+    setImportStatus('Импорт...')
+    try {
+      const text = await file.text()
+      const rows = parseCsv(text)
+      const supplierByName = Object.fromEntries(suppliers.map((s) => [s.name.toLowerCase(), s.id]))
+      const toInsert = rows
+        .filter((r) => r.name && r.name.trim())
+        .map((r, i) => ({
+          name: r.name.trim(),
+          category: r.category || '',
+          unit: r.unit || 'шт',
+          price: Number(r.price) || 0,
+          supplier_id: supplierByName[(r.supplier || '').toLowerCase()] || null,
+          payment_note: r.payment_note || '',
+          sort_order: products.length + i,
+        }))
+      if (!toInsert.length) { setImportStatus('В файле не найдено строк с товарами'); return }
+      if (supabaseReady) await supabase.from('products').insert(toInsert)
+      setImportStatus(`Добавлено товаров: ${toInsert.length}`)
+      reload()
+    } catch (err) {
+      setImportStatus('Не удалось прочитать файл — проверьте формат CSV')
+    } finally {
+      if (fileInputRef.current) fileInputRef.current.value = ''
+      setTimeout(() => setImportStatus(null), 4000)
+    }
+  }
 
   return (
     <div>
       <div className="row-form">
-        <input placeholder="Товар" value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} />
-        <select value={form.supplier_id} onChange={(e) => setForm((f) => ({ ...f, supplier_id: e.target.value }))}>
+        <input ref={nameInputRef} placeholder="Товар" value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} onKeyDown={onKeyDown} autoFocus />
+        <select value={form.supplier_id} onChange={(e) => handleSupplierChange(e.target.value)}>
           <option value="">Поставщик...</option>
           {suppliers.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
         </select>
-        <input placeholder="Категория" value={form.category} onChange={(e) => setForm((f) => ({ ...f, category: e.target.value }))} />
-        <input placeholder="ед (шт/кг/л)" value={form.unit} onChange={(e) => setForm((f) => ({ ...f, unit: e.target.value }))} />
-        <input placeholder="Цена, тг" type="number" value={form.price} onChange={(e) => setForm((f) => ({ ...f, price: e.target.value }))} />
+        <input list="categories-list" placeholder="Категория" value={form.category} onChange={(e) => setForm((f) => ({ ...f, category: e.target.value }))} onKeyDown={onKeyDown} />
+        <input list="units-list" placeholder="ед (шт/кг/л)" value={form.unit} onChange={(e) => setForm((f) => ({ ...f, unit: e.target.value }))} onKeyDown={onKeyDown} />
+        <input placeholder="Цена, тг" type="number" inputMode="decimal" value={form.price} onChange={(e) => setForm((f) => ({ ...f, price: e.target.value }))} onKeyDown={onKeyDown} />
+        <input placeholder="Примечание к оплате" value={form.payment_note} onChange={(e) => setForm((f) => ({ ...f, payment_note: e.target.value }))} onKeyDown={onKeyDown} />
         <button className="btn primary" onClick={add}>Добавить товар</button>
       </div>
-      <table className="data-table">
-        <thead><tr><th>Товар</th><th>Поставщик</th><th>Категория</th><th>ед</th><th>тг</th><th></th></tr></thead>
-        <tbody>
-          {products.map((p) => (
-            <tr key={p.id}>
-              <td><input defaultValue={p.name} onBlur={(e) => e.target.value !== p.name && update(p.id, 'name', e.target.value)} style={{ border: 'none', background: 'transparent', font: 'inherit', width: '100%' }} /></td>
-              <td>
-                <select defaultValue={p.supplier_id || ''} onChange={(e) => update(p.id, 'supplier_id', e.target.value || null)} style={{ border: 'none', background: 'transparent', font: 'inherit' }}>
-                  <option value="">—</option>
-                  {suppliers.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-                </select>
-              </td>
-              <td><input defaultValue={p.category} onBlur={(e) => e.target.value !== p.category && update(p.id, 'category', e.target.value)} style={{ border: 'none', background: 'transparent', font: 'inherit', width: '100%' }} /></td>
-              <td><input defaultValue={p.unit} onBlur={(e) => e.target.value !== p.unit && update(p.id, 'unit', e.target.value)} style={{ border: 'none', background: 'transparent', font: 'inherit', width: 44 }} /></td>
-              <td><input defaultValue={p.price} type="number" onBlur={(e) => Number(e.target.value) !== p.price && update(p.id, 'price', Number(e.target.value))} style={{ border: 'none', background: 'transparent', font: 'inherit', width: 64 }} /></td>
-              <td><button className="del-link" onClick={() => remove(p.id)}>удалить</button></td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+      <datalist id="categories-list">{categories.map((c) => <option value={c} key={c} />)}</datalist>
+      <datalist id="units-list">{units.map((u) => <option value={u} key={u} />)}</datalist>
+
+      <div className="import-row">
+        <button className="btn ghost small" onClick={downloadTemplate}>Скачать шаблон CSV</button>
+        <button className="btn ghost small" onClick={() => fileInputRef.current?.click()}>Импорт товаров из CSV</button>
+        <input ref={fileInputRef} type="file" accept=".csv" hidden onChange={(e) => e.target.files[0] && importCsvFile(e.target.files[0])} />
+        {importStatus && <span className="import-status">{importStatus}</span>}
+      </div>
+
+      <div className="table-scroll">
+        <table className="data-table">
+          <thead><tr><th>Товар</th><th>Поставщик</th><th>Категория</th><th>ед</th><th>тг</th><th>Примечание</th><th></th></tr></thead>
+          <tbody>
+            {products.map((p) => (
+              <tr key={p.id}>
+                <td><input defaultValue={p.name} onBlur={(e) => e.target.value !== p.name && update(p.id, 'name', e.target.value)} style={{ border: 'none', background: 'transparent', font: 'inherit', width: '100%' }} /></td>
+                <td>
+                  <select defaultValue={p.supplier_id || ''} onChange={(e) => update(p.id, 'supplier_id', e.target.value || null)} style={{ border: 'none', background: 'transparent', font: 'inherit' }}>
+                    <option value="">—</option>
+                    {suppliers.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                  </select>
+                </td>
+                <td><input list="categories-list" defaultValue={p.category} onBlur={(e) => e.target.value !== p.category && update(p.id, 'category', e.target.value)} style={{ border: 'none', background: 'transparent', font: 'inherit', width: '100%' }} /></td>
+                <td><input list="units-list" defaultValue={p.unit} onBlur={(e) => e.target.value !== p.unit && update(p.id, 'unit', e.target.value)} style={{ border: 'none', background: 'transparent', font: 'inherit', width: 56 }} /></td>
+                <td><input defaultValue={p.price} type="number" onBlur={(e) => Number(e.target.value) !== p.price && update(p.id, 'price', Number(e.target.value))} style={{ border: 'none', background: 'transparent', font: 'inherit', width: 64 }} /></td>
+                <td><input defaultValue={p.payment_note} onBlur={(e) => e.target.value !== p.payment_note && update(p.id, 'payment_note', e.target.value)} style={{ border: 'none', background: 'transparent', font: 'inherit', width: '100%' }} /></td>
+                <td style={{ whiteSpace: 'nowrap' }}>
+                  <button className="dup-link" onClick={() => duplicateToForm(p)} title="Заполнить форму данными этого товара, чтобы быстро добавить похожий">дублировать</button>
+                  <button className="del-link" onClick={() => remove(p.id)}>удалить</button>
+                </td>
+              </tr>
+            ))}
+            {products.length === 0 && <tr><td colSpan={7} style={{ color: 'var(--ink-soft)', textAlign: 'center', padding: 20 }}>Товаров пока нет — добавьте вручную или импортируйте CSV</td></tr>}
+          </tbody>
+        </table>
+      </div>
     </div>
   )
 }

@@ -71,7 +71,7 @@ export async function exportExcel({ items, locationName, filename, companyName }
   const ws = wb.addWorksheet(sheetName, { views: [{ showGridLines: false }] })
 
   ws.columns = [
-    { width: 40 }, { width: 9 }, { width: 9 }, { width: 15 }, { width: 17 },
+    { width: 46 }, { width: 9 }, { width: 9 }, { width: 15 }, { width: 17 },
   ]
 
   // ---- Title band (mirrors the dark PDF header) ----
@@ -132,10 +132,17 @@ export async function exportExcel({ items, locationName, filename, companyName }
       const rowNum = ws.rowCount + 1
       ws.addRow([r.product_name, r.unit, r.quantity, r.price, total])
       const isAlt = i % 2 === 1
+      // Estimate how many lines the product name needs at the current
+      // column width so the row is tall enough to show the wrapped text
+      // instead of clipping it.
+      const charsPerLine = 34
+      const nameLen = (r.product_name || '').length
+      const lineCount = Math.max(1, Math.ceil(nameLen / charsPerLine))
+      ws.getRow(rowNum).height = Math.max(18, lineCount * 14)
       for (let c = 1; c <= 5; c++) {
         const cell = ws.getCell(rowNum, c)
         cell.font = { size: 9.5, color: { argb: INK_ARGB } }
-        cell.alignment = { vertical: 'middle', horizontal: colAlign[c - 1] }
+        cell.alignment = { vertical: 'middle', horizontal: colAlign[c - 1], wrapText: c === 1 }
         gridBorder(cell)
         if (isAlt) fillCell(cell, ALT_ROW_ARGB)
         if (c >= 3) cell.numFmt = '#,##0.##'
