@@ -431,10 +431,16 @@ export default function App() {
             )}
             <div className="product-list">
               {visibleProducts.length === 0 && (
-                <div className="empty-state">Ничего не найдено. Добавьте товары в «Настройки → Товары».</div>
+                <div className="empty-state">
+                  <span className="empty-icon"><IconSearch /></span>
+                  Ничего не найдено. Добавьте товары в «Настройки → Товары».
+                </div>
               )}
               {categoryFilter && displayedGroups.length === 0 && (
-                <div className="empty-state">В этой категории нет товаров для этой точки.</div>
+                <div className="empty-state">
+                  <span className="empty-icon"><IconBox /></span>
+                  В этой категории нет товаров для этой точки.
+                </div>
               )}
               {displayedGroups.map((sup) => {
                 const inCartCountSupplier = sup.categories.reduce(
