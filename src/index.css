@@ -250,20 +250,17 @@ input, select { font-family: inherit; }
   white-space: nowrap;
 }
 
-/* Category contents mount/unmount directly (no clipping wrapper) and get
-   a quick fade+slide reveal on open. This is simpler than an animated
-   height trick and can never end up "open but empty". */
+/* Category contents simply mount/unmount — no animation, no clipping
+   wrapper, no dependency on transitions completing. This is the most
+   robust option across all environments (including remote desktop /
+   virtualized sessions where GPU-composited animations can render
+   incorrectly or appear stuck mid-transition). */
 .category-body {
   display: flex;
   flex-direction: column;
   padding: 6px;
   gap: 6px;
   background: var(--paper-raised);
-  animation: category-reveal .16s ease;
-}
-@keyframes category-reveal {
-  from { opacity: 0; transform: translateY(-4px); }
-  to { opacity: 1; transform: translateY(0); }
 }
 
 .product-row {
@@ -543,7 +540,6 @@ table.data-table tr:hover td { background: var(--paper); }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .category-body { animation: none !important; }
   .category-group,
   .category-head,
   svg[style] {
