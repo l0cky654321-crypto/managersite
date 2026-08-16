@@ -398,7 +398,7 @@ export default function App() {
                       <span className="category-count">{list.length}</span>
                       {inCartCount > 0 && <span className="category-badge">{inCartCount} в списке</span>}
                     </button>
-                    <div className={`category-collapse ${isOpen ? 'open' : ''}`}>
+                    {isOpen && (
                       <div className="category-body">
                         {list.map((p) => {
                           const sup = supplierById[p.supplier_id]
@@ -420,7 +420,7 @@ export default function App() {
                           )
                         })}
                       </div>
-                    </div>
+                    )}
                   </div>
                 )
               })}
