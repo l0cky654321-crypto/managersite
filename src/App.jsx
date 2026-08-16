@@ -106,6 +106,15 @@ function IconRepeat() {
 function IconTruck() {
   return <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round"><path d="M3 7h11v8H3z" /><path d="M14 11h4l3 3v1h-7z" /><circle cx="7.5" cy="18" r="1.6" /><circle cx="17.5" cy="18" r="1.6" /></svg>
 }
+function IconChevron() {
+  return <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.3" strokeLinecap="round" strokeLinejoin="round"><path d="M6 9l6 6 6-6" /></svg>
+}
+function IconCheck() {
+  return <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M20 6L9 17l-5-5" /></svg>
+}
+function IconInfo() {
+  return <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.3" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="9" /><path d="M12 11v5.5M12 8v.01" /></svg>
+}
 
 function Stepper({ qty, onChange, size = 'md' }) {
   return (
@@ -136,11 +145,14 @@ export default function App() {
   const [view, setView] = useState('order')
   const [locationId, setLocationId] = useState('')
   const [query, setQuery] = useState('')
+  const [categoryFilter, setCategoryFilter] = useState('')
+  const [collapsed, setCollapsed] = useState({})
   const [carts, setCarts] = useState({}) // { [locationId]: [items] }
   const [lastOrderInfo, setLastOrderInfo] = useState(null)
   const [repeatBusy, setRepeatBusy] = useState(false)
   const [toast, setToast] = useState(null)
   const toastTimer = useRef(null)
+  const ticketRef = useRef(null)
 
   useEffect(() => {
     if (!locationId && locations.length) setLocationId(locations[0].id)
@@ -148,12 +160,14 @@ export default function App() {
 
   useEffect(() => {
     setLastOrderInfo(null)
+    setCategoryFilter('')
+    setCollapsed({})
     if (locationId) store.loadLastOrder(locationId).then((res) => setLastOrderInfo(res))
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [locationId])
 
-  function showToast(text) {
-    setToast(text)
+  function showToast(text, type = 'success') {
+    setToast({ text, type })
     clearTimeout(toastTimer.current)
     toastTimer.current = setTimeout(() => setToast(null), 2600)
   }
@@ -187,7 +201,7 @@ export default function App() {
     }))
   }, [products, locationProducts, locationId, query, supplierById])
 
-  // Products grouped Поставщик -> Категория -> Товары, always fully expanded.
+  // Products grouped Поставщик -> Категория -> Товары.
   const groupedBySupplier = useMemo(() => {
     const bySupplier = new Map()
     for (const p of visibleProducts) {
@@ -207,7 +221,37 @@ export default function App() {
       .sort((a, b) => a.supplierName.localeCompare(b.supplierName, 'ru'))
   }, [visibleProducts, supplierById])
 
+  // Category chips let people jump straight to a section instead of typing
+  // a search query — sorted by how many items they contain.
+  const categoryOptions = useMemo(() => {
+    const counts = new Map()
+    for (const p of visibleProducts) {
+      const cat = p.category?.trim() || 'Без категории'
+      counts.set(cat, (counts.get(cat) || 0) + 1)
+    }
+    return [...counts.entries()].sort((a, b) => b[1] - a[1])
+  }, [visibleProducts])
+
+  const isFiltering = Boolean(query.trim() || categoryFilter)
+
+  const displayedGroups = useMemo(() => {
+    if (!categoryFilter) return groupedBySupplier
+    return groupedBySupplier
+      .map((s) => ({ ...s, categories: s.categories.filter(([cat]) => cat === categoryFilter) }))
+      .filter((s) => s.categories.length)
+  }, [groupedBySupplier, categoryFilter])
+
   const totalProductCount = visibleProducts.length
+
+  function toggleSupplier(id) {
+    setCollapsed((prev) => ({ ...prev, [id]: !prev[id] }))
+  }
+  const allCollapsed = displayedGroups.length > 0 && displayedGroups.every((s) => collapsed[s.supplierId])
+  function toggleAllCollapsed() {
+    const next = {}
+    if (!allCollapsed) for (const s of displayedGroups) next[s.supplierId] = true
+    setCollapsed(next)
+  }
 
   function setQty(product, qty) {
     const sup = supplierById[product.supplier_id]
@@ -258,10 +302,10 @@ export default function App() {
     setRepeatBusy(true)
     const res = lastOrderInfo || (await store.loadLastOrder(locationId))
     setRepeatBusy(false)
-    if (!res) { showToast('Прошлых закупов по этой точке не найдено'); return }
+    if (!res) { showToast('Прошлых закупов по этой точке не найдено', 'info'); return }
     if (cart.length && !window.confirm('Текущий список будет заменён товарами прошлого закупа. Продолжить?')) return
     setCarts((prev) => ({ ...prev, [locationId]: res.items }))
-    showToast('Прошлый закуп загружен — проверьте количества')
+    showToast('Прошлый закуп загружен — проверьте количества', 'info')
   }
 
   const grandTotal = cart.reduce((s, it) => s + it.quantity * it.price, 0)
@@ -300,7 +344,7 @@ export default function App() {
       }
     }
     await handleExport('excel')
-    showToast('Закуп завершён и сохранён')
+    showToast('Закуп завершён и сохранён', 'success')
     clearCart()
   }
 
@@ -326,13 +370,35 @@ export default function App() {
       )}
 
       {loading ? (
-        <div className="loading-state"><div className="spinner" /> Загрузка данных…</div>
+        <div className="main">
+          <div className="panel skeleton-panel">
+            <div className="skel skel-line" style={{ width: '40%', height: 14, marginBottom: 18 }} />
+            <div className="skel skel-line" style={{ width: '100%', height: 40, marginBottom: 16, borderRadius: 10 }} />
+            {[0, 1, 2].map((i) => (
+              <div className="skel-group" key={i}>
+                <div className="skel skel-line" style={{ width: '30%', height: 34, borderRadius: 10 }} />
+                <div className="skel-rows">
+                  {[0, 1, 2].map((j) => <div className="skel skel-line" key={j} style={{ height: 42, borderRadius: 10 }} />)}
+                </div>
+              </div>
+            ))}
+          </div>
+          <div className="panel skeleton-panel">
+            <div className="skel skel-line" style={{ width: '50%', height: 16, marginBottom: 16 }} />
+            {[0, 1, 2, 3].map((i) => <div className="skel skel-line" key={i} style={{ height: 20, marginBottom: 12 }} />)}
+          </div>
+        </div>
       ) : view === 'order' ? (
         <div className="main">
           <div className="panel">
             <div className="panel-head-row">
               <h2>Товары {totalProductCount > 0 && <span className="category-count">{totalProductCount}</span>}</h2>
               <div className="panel-head-actions">
+                {displayedGroups.length > 1 && (
+                  <button className="btn ghost small" onClick={toggleAllCollapsed}>
+                    {allCollapsed ? 'Развернуть всё' : 'Свернуть всё'}
+                  </button>
+                )}
                 {lastOrderInfo && (
                   <button className="btn ghost small" disabled={repeatBusy} onClick={repeatLastOrder}>
                     <IconRepeat /> Повторить прошлый закуп
@@ -351,63 +417,82 @@ export default function App() {
                 <button className="search-clear" onClick={() => setQuery('')} aria-label="Очистить поиск"><IconClose /></button>
               )}
             </div>
+            {categoryOptions.length > 1 && (
+              <div className="chip-row">
+                <button className={`chip ${!categoryFilter ? 'active' : ''}`} onClick={() => setCategoryFilter('')}>
+                  Все <span className="chip-count">{totalProductCount}</span>
+                </button>
+                {categoryOptions.map(([cat, count]) => (
+                  <button key={cat} className={`chip ${categoryFilter === cat ? 'active' : ''}`} onClick={() => setCategoryFilter(categoryFilter === cat ? '' : cat)}>
+                    {cat} <span className="chip-count">{count}</span>
+                  </button>
+                ))}
+              </div>
+            )}
             <div className="product-list">
               {visibleProducts.length === 0 && (
                 <div className="empty-state">Ничего не найдено. Добавьте товары в «Настройки → Товары».</div>
               )}
-              {groupedBySupplier.map((sup) => {
+              {categoryFilter && displayedGroups.length === 0 && (
+                <div className="empty-state">В этой категории нет товаров для этой точки.</div>
+              )}
+              {displayedGroups.map((sup) => {
                 const inCartCountSupplier = sup.categories.reduce(
                   (n, [, list]) => n + list.filter((p) => cartById[p.id]).length,
                   0
                 )
+                const isOpen = isFiltering || !collapsed[sup.supplierId]
                 return (
                   <div className="supplier-group" key={sup.supplierId}>
-                    <div className="supplier-head">
+                    <button type="button" className="supplier-head" onClick={() => toggleSupplier(sup.supplierId)} aria-expanded={isOpen}>
                       <IconTruck />
                       <span className="supplier-name">{sup.supplierName}</span>
                       <span className="category-count">{sup.total}</span>
                       {inCartCountSupplier > 0 && <span className="category-badge">{inCartCountSupplier} в списке</span>}
-                    </div>
-                    <div className="supplier-body">
-                      {sup.categories.map(([cat, list]) => {
-                        const inCartCount = list.filter((p) => cartById[p.id]).length
-                        return (
-                          <div className="category-group" key={cat}>
-                            <div className="category-head">
-                              <span className="category-name">{cat}</span>
-                              <span className="category-count">{list.length}</span>
-                              {inCartCount > 0 && <span className="category-badge">{inCartCount} в списке</span>}
-                            </div>
-                            <div className="category-body">
-                              {list.map((p) => {
-                                const inCart = cartById[p.id]
-                                const qty = inCart ? inCart.quantity : 0
-                                return (
-                                  <div className={`product-row ${qty > 0 ? 'in-cart' : ''}`} key={p.id}>
-                                    <div className="product-info">
-                                      <div className="name">{p.name}</div>
+                      <span className={`chevron ${isOpen ? 'open' : ''}`}><IconChevron /></span>
+                    </button>
+                    {isOpen && (
+                      <div className="supplier-body">
+                        {sup.categories.map(([cat, list]) => {
+                          const inCartCount = list.filter((p) => cartById[p.id]).length
+                          return (
+                            <div className="category-group" key={cat}>
+                              <div className="category-head">
+                                <span className="category-name">{cat}</span>
+                                <span className="category-count">{list.length}</span>
+                                {inCartCount > 0 && <span className="category-badge">{inCartCount} в списке</span>}
+                              </div>
+                              <div className="category-body">
+                                {list.map((p) => {
+                                  const inCart = cartById[p.id]
+                                  const qty = inCart ? inCart.quantity : 0
+                                  return (
+                                    <div className={`product-row ${qty > 0 ? 'in-cart' : ''}`} key={p.id}>
+                                      <div className="product-info">
+                                        <div className="name">{p.name}</div>
+                                      </div>
+                                      <div className="price">{money(p.effective_price)} ₸<span className="unit">/{p.unit}</span></div>
+                                      {qty > 0 ? (
+                                        <Stepper qty={qty} onChange={(v) => setQty(p, v)} />
+                                      ) : (
+                                        <button className="add-btn" onClick={() => setQty(p, 1)} aria-label="Добавить">+</button>
+                                      )}
                                     </div>
-                                    <div className="price">{money(p.effective_price)} ₸<span className="unit">/{p.unit}</span></div>
-                                    {qty > 0 ? (
-                                      <Stepper qty={qty} onChange={(v) => setQty(p, v)} />
-                                    ) : (
-                                      <button className="add-btn" onClick={() => setQty(p, 1)} aria-label="Добавить">+</button>
-                                    )}
-                                  </div>
-                                )
-                              })}
+                                  )
+                                })}
+                              </div>
                             </div>
-                          </div>
-                        )
-                      })}
-                    </div>
+                          )
+                        })}
+                      </div>
+                    )}
                   </div>
                 )
               })}
             </div>
           </div>
 
-          <div className="ticket">
+          <div className="ticket" ref={ticketRef}>
             <div className="ticket-head">
               <h2>{currentLocation?.name || 'Точка не выбрана'}</h2>
               <div className="sub">{cart.length ? `${cart.length} позиций` : 'Список пуст'}</div>
@@ -452,7 +537,24 @@ export default function App() {
         <Settings store={store} />
       )}
 
-      {toast && <div className="toast">{toast}</div>}
+      {view === 'order' && cart.length > 0 && (
+        <button
+          type="button"
+          className="mobile-cart-bar"
+          onClick={() => ticketRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
+        >
+          <span>{cart.length} {cart.length === 1 ? 'позиция' : 'позиций'}</span>
+          <span className="mobile-cart-total">{money(grandTotal)} ₸</span>
+          <span className="mobile-cart-arrow">Открыть ↑</span>
+        </button>
+      )}
+
+      {toast && (
+        <div className={`toast toast-${toast.type}`}>
+          <span className="toast-icon">{toast.type === 'success' ? <IconCheck /> : <IconInfo />}</span>
+          {toast.text}
+        </div>
+      )}
 
       <div className="footer-note">Данные хранятся в Supabase · Отчёты формируются на устройстве, ничего не отправляется на сторонние серверы</div>
     </div>

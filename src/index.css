@@ -209,6 +209,35 @@ button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible
 }
 .search-clear:hover { background: var(--bad); color: #fff; }
 
+/* Category quick filter chips */
+.chip-row {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding-bottom: 10px;
+  margin-bottom: 4px;
+}
+.chip {
+  flex-shrink: 0;
+  border: 1px solid var(--line);
+  background: var(--paper-raised);
+  color: var(--ink-soft);
+  border-radius: 100px;
+  padding: 6px 12px;
+  font-size: 12.5px;
+  font-weight: 700;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: background .15s, border-color .15s, color .15s;
+  white-space: nowrap;
+}
+.chip:hover { border-color: var(--accent); color: var(--ink); }
+.chip.active { background: var(--ink); border-color: var(--ink); color: #fff; }
+.chip-count { opacity: 0.65; font-variant-numeric: tabular-nums; }
+.chip.active .chip-count { opacity: 0.85; }
+
 .product-list {
   display: flex;
   flex-direction: column;
@@ -233,7 +262,21 @@ button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible
   padding: 13px 14px;
   background: var(--ink);
   color: #fff;
+  border: none;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background .15s;
 }
+.supplier-head:hover { background: #262c3c; }
+.supplier-head .chevron {
+  display: flex;
+  align-items: center;
+  opacity: 0.75;
+  transition: transform .18s ease;
+  flex-shrink: 0;
+}
+.supplier-head .chevron.open { transform: rotate(180deg); }
 .supplier-head .supplier-name {
   font-weight: 800;
   font-size: 14px;
@@ -582,6 +625,25 @@ table.data-table tr:hover td { background: var(--paper); }
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 
+/* Loading skeleton for the order screen */
+.skeleton-panel { display: flex; flex-direction: column; }
+.skel {
+  background: linear-gradient(90deg, #eeece4 25%, #f7f5ee 37%, #eeece4 63%);
+  background-size: 400% 100%;
+  animation: skel-shimmer 1.4s ease infinite;
+  border-radius: 8px;
+}
+.skel-line { width: 100%; }
+.skel-group { margin-bottom: 14px; }
+.skel-rows { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+@keyframes skel-shimmer {
+  0% { background-position: 100% 0; }
+  100% { background-position: -100% 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .skel { animation: none; background: #eeece4; }
+}
+
 .notice {
   background: #fff4e0;
   border: 1px solid #f0d9a6;
@@ -606,10 +668,47 @@ table.data-table tr:hover td { background: var(--paper); }
   box-shadow: var(--shadow-lg);
   z-index: 50;
   animation: toast-in .2s ease-out;
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
+.toast-icon { display: flex; flex-shrink: 0; }
+.toast-success .toast-icon { color: #7fe0b6; }
+.toast-info .toast-icon { color: #f3c66e; }
 @keyframes toast-in {
   from { opacity: 0; transform: translate(-50%, 10px); }
   to { opacity: 1; transform: translate(-50%, 0); }
+}
+
+/* Floating cart summary bar, shown on mobile only so the total/checkout
+   is always reachable without scrolling past the whole product list. */
+.mobile-cart-bar {
+  display: none;
+  position: sticky;
+  bottom: 12px;
+  left: 0;
+  right: 0;
+  z-index: 25;
+  margin: 10px 14px 0;
+  background: var(--ink);
+  color: #fff;
+  border: none;
+  border-radius: 100px;
+  padding: 13px 18px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 13.5px;
+  font-weight: 700;
+  cursor: pointer;
+  box-shadow: var(--shadow-lg);
+  font-family: inherit;
+}
+.mobile-cart-bar:active { transform: scale(0.98); }
+.mobile-cart-total { font-family: var(--mono); color: var(--accent); }
+.mobile-cart-arrow { color: #b7bdcc; font-weight: 600; font-size: 12px; }
+@media (max-width: 900px) {
+  .mobile-cart-bar { display: flex; }
 }
 
 .footer-note {
