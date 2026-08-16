@@ -250,23 +250,20 @@ input, select { font-family: inherit; }
   white-space: nowrap;
 }
 
-/* Smooth accordion using the CSS grid-rows trick — no JS height measurement needed */
-.category-collapse {
-  display: grid;
-  grid-template-rows: 0fr;
-  transition: grid-template-rows .22s ease;
-}
-.category-collapse.open {
-  grid-template-rows: 1fr;
-}
+/* Category contents mount/unmount directly (no clipping wrapper) and get
+   a quick fade+slide reveal on open. This is simpler than an animated
+   height trick and can never end up "open but empty". */
 .category-body {
   display: flex;
   flex-direction: column;
   padding: 6px;
   gap: 6px;
   background: var(--paper-raised);
-  overflow: hidden;
-  min-height: 0;
+  animation: category-reveal .16s ease;
+}
+@keyframes category-reveal {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 
 .product-row {
@@ -546,7 +543,7 @@ table.data-table tr:hover td { background: var(--paper); }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .category-collapse,
+  .category-body { animation: none !important; }
   .category-group,
   .category-head,
   svg[style] {
