@@ -561,19 +561,48 @@ export default function App() {
   )
 }
 
+function ConfirmDialog({ open, title, message, confirmLabel = 'Удалить', onCancel, onConfirm }) {
+  if (!open) return null
+  return (
+    <div className="modal-backdrop" onClick={onCancel}>
+      <div className="modal-card" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
+        <div className="modal-title">{title}</div>
+        {message && <div className="modal-message">{message}</div>}
+        <div className="modal-actions">
+          <button className="btn" onClick={onCancel}>Отмена</button>
+          <button className="btn danger" onClick={onConfirm}>{confirmLabel}</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function IconLocation() {
+  return <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 22s7-7.4 7-12.5A7 7 0 0 0 5 9.5C5 14.6 12 22 12 22z" /><circle cx="12" cy="9.5" r="2.4" /></svg>
+}
+function IconBox() {
+  return <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 8L12 3 3 8l9 5 9-5z" /><path d="M3 8v9l9 5 9-5V8" /><path d="M12 13v9" /></svg>
+}
+function IconFile() {
+  return <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M7 3h7l5 5v13H7z" /><path d="M14 3v5h5" /><path d="M9.5 13h5M9.5 16.5h5" /></svg>
+}
+
 function Settings({ store }) {
   const [tab, setTab] = useState('locations')
+  const tabs = [
+    ['locations', 'Точки', IconLocation],
+    ['suppliers', 'Поставщики', IconTruck],
+    ['products', 'Товары', IconBox],
+    ['report', 'Отчёт', IconFile],
+  ]
   return (
     <div className="main" style={{ gridTemplateColumns: '1fr' }}>
       <div className="panel">
-        <nav style={{ display: 'flex', gap: 6, marginBottom: 16, flexWrap: 'wrap' }}>
-          {[
-            ['locations', 'Точки'],
-            ['suppliers', 'Поставщики'],
-            ['products', 'Товары'],
-            ['report', 'Отчёт'],
-          ].map(([k, label]) => (
-            <button key={k} className={`tab-btn ${tab === k ? 'active' : ''}`} style={{ background: tab === k ? 'var(--ink)' : 'transparent', color: tab === k ? '#fff' : 'var(--ink-soft)' }} onClick={() => setTab(k)}>{label}</button>
+        <nav className="settings-nav">
+          {tabs.map(([k, label, Icon]) => (
+            <button key={k} className={`tab-btn settings-tab ${tab === k ? 'active' : ''}`} onClick={() => setTab(k)}>
+              <Icon /> {label}
+            </button>
           ))}
         </nav>
         {tab === 'locations' && <LocationsTab store={store} />}
@@ -588,6 +617,7 @@ function Settings({ store }) {
 function LocationsTab({ store }) {
   const { locations, reload } = store
   const [name, setName] = useState('')
+  const [confirmTarget, setConfirmTarget] = useState(null)
 
   async function add() {
     if (!name.trim()) return
@@ -597,6 +627,7 @@ function LocationsTab({ store }) {
   }
   async function remove(id) {
     if (supabaseReady) await supabase.from('locations').delete().eq('id', id)
+    setConfirmTarget(null)
     reload()
   }
   async function rename(id, value) {
@@ -617,13 +648,20 @@ function LocationsTab({ store }) {
             {locations.map((l) => (
               <tr key={l.id}>
                 <td><input defaultValue={l.name} onBlur={(e) => e.target.value !== l.name && rename(l.id, e.target.value)} style={{ border: 'none', background: 'transparent', font: 'inherit', width: '100%' }} /></td>
-                <td><button className="del-link" onClick={() => remove(l.id)}>удалить</button></td>
+                <td><button className="del-link" onClick={() => setConfirmTarget(l)}>удалить</button></td>
               </tr>
             ))}
             {locations.length === 0 && <tr><td colSpan={2} style={{ color: 'var(--ink-soft)', textAlign: 'center', padding: 20 }}>Точек пока нет — добавьте первую выше</td></tr>}
           </tbody>
         </table>
       </div>
+      <ConfirmDialog
+        open={!!confirmTarget}
+        title={`Удалить точку «${confirmTarget?.name}»?`}
+        message="Товары и поставщики затронуты не будут, но история закупов по этой точке останется без привязки."
+        onCancel={() => setConfirmTarget(null)}
+        onConfirm={() => remove(confirmTarget.id)}
+      />
     </div>
   )
 }
@@ -631,6 +669,8 @@ function LocationsTab({ store }) {
 function SuppliersTab({ store }) {
   const { suppliers, reload } = store
   const [form, setForm] = useState({ name: '', contact: '', note: '' })
+  const [confirmTarget, setConfirmTarget] = useState(null)
+  const [q, setQ] = useState('')
 
   async function add() {
     if (!form.name.trim()) return
@@ -640,6 +680,7 @@ function SuppliersTab({ store }) {
   }
   async function remove(id) {
     if (supabaseReady) await supabase.from('suppliers').delete().eq('id', id)
+    setConfirmTarget(null)
     reload()
   }
   async function update(id, field, value) {
@@ -649,6 +690,12 @@ function SuppliersTab({ store }) {
 
   function onKeyDown(e) { if (e.key === 'Enter') add() }
 
+  const filtered = useMemo(() => {
+    if (!q.trim()) return suppliers
+    const s = q.trim().toLowerCase()
+    return suppliers.filter((sup) => sup.name.toLowerCase().includes(s) || (sup.contact || '').toLowerCase().includes(s))
+  }, [suppliers, q])
+
   return (
     <div>
       <div className="row-form">
@@ -657,22 +704,36 @@ function SuppliersTab({ store }) {
         <input placeholder="Примечание (напр. с кассы)" value={form.note} onChange={(e) => setForm((f) => ({ ...f, note: e.target.value }))} onKeyDown={onKeyDown} />
         <button className="btn primary" onClick={add}>Добавить</button>
       </div>
+      {suppliers.length > 5 && (
+        <div className="settings-search">
+          <IconSearch />
+          <input placeholder="Поиск по поставщикам..." value={q} onChange={(e) => setQ(e.target.value)} />
+        </div>
+      )}
       <div className="table-scroll">
         <table className="data-table">
           <thead><tr><th>Поставщик</th><th>Контакты</th><th>Примечание</th><th></th></tr></thead>
           <tbody>
-            {suppliers.map((s) => (
+            {filtered.map((s) => (
               <tr key={s.id}>
                 <td><input defaultValue={s.name} onBlur={(e) => e.target.value !== s.name && update(s.id, 'name', e.target.value)} style={{ border: 'none', background: 'transparent', font: 'inherit', width: '100%' }} /></td>
                 <td><input defaultValue={s.contact} onBlur={(e) => e.target.value !== s.contact && update(s.id, 'contact', e.target.value)} style={{ border: 'none', background: 'transparent', font: 'inherit', width: '100%' }} /></td>
                 <td><input defaultValue={s.note} onBlur={(e) => e.target.value !== s.note && update(s.id, 'note', e.target.value)} style={{ border: 'none', background: 'transparent', font: 'inherit', width: '100%' }} /></td>
-                <td><button className="del-link" onClick={() => remove(s.id)}>удалить</button></td>
+                <td><button className="del-link" onClick={() => setConfirmTarget(s)}>удалить</button></td>
               </tr>
             ))}
             {suppliers.length === 0 && <tr><td colSpan={4} style={{ color: 'var(--ink-soft)', textAlign: 'center', padding: 20 }}>Поставщиков пока нет — добавьте первого выше</td></tr>}
+            {suppliers.length > 0 && filtered.length === 0 && <tr><td colSpan={4} style={{ color: 'var(--ink-soft)', textAlign: 'center', padding: 20 }}>Ничего не найдено по запросу «{q}»</td></tr>}
           </tbody>
         </table>
       </div>
+      <ConfirmDialog
+        open={!!confirmTarget}
+        title={`Удалить поставщика «${confirmTarget?.name}»?`}
+        message="Товары, привязанные к этому поставщику, останутся без поставщика."
+        onCancel={() => setConfirmTarget(null)}
+        onConfirm={() => remove(confirmTarget.id)}
+      />
     </div>
   )
 }
@@ -684,6 +745,8 @@ function ProductsTab({ store }) {
   const { products, suppliers, reload } = store
   const [form, setForm] = useState(emptyProductForm)
   const [importStatus, setImportStatus] = useState(null)
+  const [confirmTarget, setConfirmTarget] = useState(null)
+  const [q, setQ] = useState('')
   const nameInputRef = useRef(null)
   const fileInputRef = useRef(null)
 
@@ -723,6 +786,7 @@ function ProductsTab({ store }) {
   }
   async function remove(id) {
     if (supabaseReady) await supabase.from('products').delete().eq('id', id)
+    setConfirmTarget(null)
     reload()
   }
   async function update(id, field, value) {
@@ -790,6 +854,16 @@ function ProductsTab({ store }) {
     }
   }
 
+  const filtered = useMemo(() => {
+    if (!q.trim()) return products
+    const s = q.trim().toLowerCase()
+    return products.filter((p) =>
+      p.name.toLowerCase().includes(s) ||
+      (p.category || '').toLowerCase().includes(s) ||
+      (supplierById[p.supplier_id]?.name || '').toLowerCase().includes(s)
+    )
+  }, [products, q, supplierById])
+
   return (
     <div>
       <div className="row-form">
@@ -814,11 +888,19 @@ function ProductsTab({ store }) {
         {importStatus && <span className="import-status">{importStatus}</span>}
       </div>
 
+      {products.length > 6 && (
+        <div className="settings-search">
+          <IconSearch />
+          <input placeholder="Поиск по товарам, категории или поставщику..." value={q} onChange={(e) => setQ(e.target.value)} />
+          <span className="settings-search-count">{filtered.length} из {products.length}</span>
+        </div>
+      )}
+
       <div className="table-scroll">
         <table className="data-table">
           <thead><tr><th>Товар</th><th>Поставщик</th><th>Категория</th><th>ед</th><th>тг</th><th>Примечание</th><th></th></tr></thead>
           <tbody>
-            {products.map((p) => (
+            {filtered.map((p) => (
               <tr key={p.id}>
                 <td><input defaultValue={p.name} onBlur={(e) => e.target.value !== p.name && update(p.id, 'name', e.target.value)} style={{ border: 'none', background: 'transparent', font: 'inherit', width: '100%' }} /></td>
                 <td>
@@ -833,14 +915,22 @@ function ProductsTab({ store }) {
                 <td><input defaultValue={p.payment_note} onBlur={(e) => e.target.value !== p.payment_note && update(p.id, 'payment_note', e.target.value)} style={{ border: 'none', background: 'transparent', font: 'inherit', width: '100%' }} /></td>
                 <td style={{ whiteSpace: 'nowrap' }}>
                   <button className="dup-link" onClick={() => duplicateToForm(p)} title="Заполнить форму данными этого товара, чтобы быстро добавить похожий">дублировать</button>
-                  <button className="del-link" onClick={() => remove(p.id)}>удалить</button>
+                  <button className="del-link" onClick={() => setConfirmTarget(p)}>удалить</button>
                 </td>
               </tr>
             ))}
             {products.length === 0 && <tr><td colSpan={7} style={{ color: 'var(--ink-soft)', textAlign: 'center', padding: 20 }}>Товаров пока нет — добавьте вручную или импортируйте CSV</td></tr>}
+            {products.length > 0 && filtered.length === 0 && <tr><td colSpan={7} style={{ color: 'var(--ink-soft)', textAlign: 'center', padding: 20 }}>Ничего не найдено по запросу «{q}»</td></tr>}
           </tbody>
         </table>
       </div>
+      <ConfirmDialog
+        open={!!confirmTarget}
+        title={`Удалить товар «${confirmTarget?.name}»?`}
+        message="Товар исчезнет из списка закупа для всех точек. Это действие нельзя отменить."
+        onCancel={() => setConfirmTarget(null)}
+        onConfirm={() => remove(confirmTarget.id)}
+      />
     </div>
   )
 }
@@ -848,6 +938,7 @@ function ProductsTab({ store }) {
 function ReportTab({ store }) {
   const { settings, setSettings, reload } = store
   const [local, setLocal] = useState(settings)
+  const [saved, setSaved] = useState(false)
 
   useEffect(() => setLocal(settings), [settings])
 
@@ -855,28 +946,32 @@ function ReportTab({ store }) {
     if (supabaseReady) await supabase.from('app_settings').update(local).eq('id', 1)
     setSettings(local)
     reload()
+    setSaved(true)
+    setTimeout(() => setSaved(false), 2000)
   }
 
   return (
-    <div style={{ maxWidth: 480 }}>
-      <div style={{ marginBottom: 14 }}>
-        <label style={{ fontSize: 13, color: 'var(--ink-soft)', display: 'block', marginBottom: 4 }}>Шаблон имени файла</label>
+    <div className="report-form">
+      <div className="field-block">
+        <label>Шаблон имени файла</label>
         <input
-          style={{ width: '100%', padding: 10, border: '1px solid var(--line)', borderRadius: 8 }}
           value={local.report_filename_template || ''}
           onChange={(e) => setLocal((s) => ({ ...s, report_filename_template: e.target.value }))}
         />
-        <div style={{ fontSize: 12, color: 'var(--ink-soft)', marginTop: 4 }}>Доступно: <span className="badge">{'{location}'}</span> <span className="badge">{'{date}'}</span></div>
+        <div className="field-hint">Доступно: <span className="badge">{'{location}'}</span> <span className="badge">{'{date}'}</span></div>
       </div>
-      <div style={{ marginBottom: 14 }}>
-        <label style={{ fontSize: 13, color: 'var(--ink-soft)', display: 'block', marginBottom: 4 }}>Название компании (для PDF)</label>
+      <div className="field-block">
+        <label>Название компании (для PDF и Excel)</label>
         <input
-          style={{ width: '100%', padding: 10, border: '1px solid var(--line)', borderRadius: 8 }}
           value={local.company_name || ''}
           onChange={(e) => setLocal((s) => ({ ...s, company_name: e.target.value }))}
+          placeholder="Необязательно"
         />
       </div>
-      <button className="btn primary" onClick={save}>Сохранить</button>
+      <div className="field-block-actions">
+        <button className="btn primary" onClick={save}>Сохранить</button>
+        {saved && <span className="save-confirm"><IconCheck /> Сохранено</span>}
+      </div>
     </div>
   )
 }
