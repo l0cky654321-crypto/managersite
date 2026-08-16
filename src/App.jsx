@@ -104,7 +104,12 @@ function IconRepeat() {
   return <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 2.1l4 4-4 4" /><path d="M3 12.7V12a9 9 0 0 1 15.3-6.4L21 8.1" /><path d="M7 21.9l-4-4 4-4" /><path d="M21 11.3v.7a9 9 0 0 1-15.3 6.4L3 15.9" /></svg>
 }
 function IconChevron({ open }) {
-  return <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" style={{ transform: open ? 'rotate(180deg)' : 'none', transition: 'transform .15s' }}><path d="M6 9l6 6 6-6" /></svg>
+  return <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" style={{ transform: open ? 'rotate(180deg)' : 'none', transition: 'transform .2s' }}><path d="M6 9l6 6 6-6" /></svg>
+}
+function IconLayers({ expand }) {
+  return expand
+    ? <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M7 13l5 5 5-5" /><path d="M7 6l5 5 5-5" /></svg>
+    : <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M7 11l5-5 5 5" /><path d="M7 18l5-5 5 5" /></svg>
 }
 
 function Stepper({ qty, onChange, size = 'md' }) {
@@ -136,7 +141,14 @@ export default function App() {
   const [view, setView] = useState('order')
   const [locationId, setLocationId] = useState('')
   const [query, setQuery] = useState('')
-  const [collapsed, setCollapsed] = useState({})
+  const [collapsed, setCollapsed] = useState(() => {
+    try {
+      const saved = localStorage.getItem('zakup_collapsed_v1')
+      return saved ? JSON.parse(saved) : {}
+    } catch {
+      return {}
+    }
+  })
   const [carts, setCarts] = useState({}) // { [locationId]: [items] }
   const [lastOrderInfo, setLastOrderInfo] = useState(null)
   const [repeatBusy, setRepeatBusy] = useState(false)
@@ -152,6 +164,10 @@ export default function App() {
     if (locationId) store.loadLastOrder(locationId).then((res) => setLastOrderInfo(res))
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [locationId])
+
+  useEffect(() => {
+    try { localStorage.setItem('zakup_collapsed_v1', JSON.stringify(collapsed)) } catch { /* ignore */ }
+  }, [collapsed])
 
   function showToast(text) {
     setToast(text)
@@ -293,8 +309,21 @@ export default function App() {
     clearCart()
   }
 
+  const isSearching = query.trim().length > 0
+
   function toggleCategory(key) {
     setCollapsed((c) => ({ ...c, [key]: !c[key] }))
+  }
+
+  const allCollapsed = categorized.length > 0 && categorized.every(([cat]) => collapsed[cat])
+
+  function toggleAll() {
+    setCollapsed((c) => {
+      const next = { ...c }
+      const collapseThem = !allCollapsed
+      for (const [cat] of categorized) next[cat] = collapseThem
+      return next
+    })
   }
 
   return (
@@ -325,11 +354,18 @@ export default function App() {
           <div className="panel">
             <div className="panel-head-row">
               <h2>Товары</h2>
-              {lastOrderInfo && (
-                <button className="btn ghost small" disabled={repeatBusy} onClick={repeatLastOrder}>
-                  <IconRepeat /> Повторить прошлый закуп
-                </button>
-              )}
+              <div className="panel-head-actions">
+                {categorized.length > 0 && (
+                  <button className="btn ghost small" onClick={toggleAll}>
+                    <IconLayers expand={allCollapsed} /> {allCollapsed ? 'Развернуть все' : 'Свернуть все'}
+                  </button>
+                )}
+                {lastOrderInfo && (
+                  <button className="btn ghost small" disabled={repeatBusy} onClick={repeatLastOrder}>
+                    <IconRepeat /> Повторить прошлый закуп
+                  </button>
+                )}
+              </div>
             </div>
             <div className="search-row">
               <span className="search-icon"><IconSearch /></span>
@@ -347,17 +383,22 @@ export default function App() {
                 <div className="empty-state">Ничего не найдено. Добавьте товары в «Настройки → Товары».</div>
               )}
               {categorized.map(([cat, list]) => {
-                const isCollapsed = !!collapsed[cat]
+                const isOpen = isSearching || !collapsed[cat]
                 const inCartCount = list.filter((p) => cartById[p.id]).length
                 return (
-                  <div className="category-group" key={cat}>
-                    <button className="category-head" onClick={() => toggleCategory(cat)}>
-                      <IconChevron open={!isCollapsed} />
+                  <div className={`category-group ${isOpen ? 'is-open' : ''}`} key={cat}>
+                    <button
+                      className="category-head"
+                      onClick={() => toggleCategory(cat)}
+                      disabled={isSearching}
+                      aria-expanded={isOpen}
+                    >
+                      <IconChevron open={isOpen} />
                       <span className="category-name">{cat}</span>
                       <span className="category-count">{list.length}</span>
                       {inCartCount > 0 && <span className="category-badge">{inCartCount} в списке</span>}
                     </button>
-                    {!isCollapsed && (
+                    <div className={`category-collapse ${isOpen ? 'open' : ''}`}>
                       <div className="category-body">
                         {list.map((p) => {
                           const sup = supplierById[p.supplier_id]
@@ -379,7 +420,7 @@ export default function App() {
                           )
                         })}
                       </div>
-                    )}
+                    </div>
                   </div>
                 )
               })}
