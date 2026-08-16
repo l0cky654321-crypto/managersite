@@ -127,6 +127,12 @@ input, select { font-family: inherit; }
   gap: 8px;
   margin-bottom: 4px;
 }
+.panel-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
 .panel h2 {
   margin: 0 0 12px;
   font-size: 13px;
@@ -195,20 +201,28 @@ input, select { font-family: inherit; }
   border: 1px solid var(--line);
   border-radius: 12px;
   overflow: hidden;
+  transition: border-color .15s, box-shadow .15s;
+}
+.category-group.is-open {
+  border-color: #d8d5cb;
+  box-shadow: var(--shadow-sm);
 }
 .category-head {
   width: 100%;
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 10px 12px;
+  padding: 11px 12px;
   background: var(--paper);
   border: none;
   cursor: pointer;
   text-align: left;
   color: var(--ink-soft);
+  transition: background .15s;
 }
-.category-head:hover { background: #ebe9e2; }
+.category-group.is-open > .category-head { background: #edece5; }
+.category-head:hover:not(:disabled) { background: #ebe9e2; }
+.category-head:disabled { cursor: default; opacity: 0.85; }
 .category-name {
   font-weight: 700;
   font-size: 13px;
@@ -223,6 +237,7 @@ input, select { font-family: inherit; }
   border: 1px solid var(--line);
   border-radius: 100px;
   padding: 1px 8px;
+  font-variant-numeric: tabular-nums;
 }
 .category-badge {
   margin-left: auto;
@@ -232,6 +247,17 @@ input, select { font-family: inherit; }
   background: var(--accent-soft);
   border-radius: 100px;
   padding: 3px 9px;
+  white-space: nowrap;
+}
+
+/* Smooth accordion using the CSS grid-rows trick — no JS height measurement needed */
+.category-collapse {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows .22s ease;
+}
+.category-collapse.open {
+  grid-template-rows: 1fr;
 }
 .category-body {
   display: flex;
@@ -239,6 +265,8 @@ input, select { font-family: inherit; }
   padding: 6px;
   gap: 6px;
   background: var(--paper-raised);
+  overflow: hidden;
+  min-height: 0;
 }
 
 .product-row {
@@ -515,4 +543,13 @@ table.data-table tr:hover td { background: var(--paper); }
 
 @media (max-width: 900px) {
   .ticket { position: static; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .category-collapse,
+  .category-group,
+  .category-head,
+  svg[style] {
+    transition: none !important;
+  }
 }
