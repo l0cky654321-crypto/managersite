@@ -30,12 +30,17 @@ create table if not exists products (
   unit text not null default 'шт',   -- ед. измерения: шт, кг, л, уп, пач ...
   price numeric(12,2) not null default 0,   -- цена в тг за ед.
   payment_note text,      -- "с кассы" и т.п., копируется из поставщика по умолчанию
+  hint text,               -- короткая подсказка, напр. "К этому ведру нужна крышка: ..."
   is_archived boolean not null default false,
   sort_order int not null default 0,
   created_at timestamptz not null default now()
 );
 create index if not exists idx_products_supplier on products(supplier_id);
 create index if not exists idx_products_name on products using gin (to_tsvector('simple', name));
+
+-- Если таблица products уже была создана раньше без колонки hint —
+-- эта строка безопасно добавит её (ничего не сломает при повторном запуске).
+alter table products add column if not exists hint text;
 
 -- Какие товары доступны в какой точке + возможность переопределить цену для точки
 create table if not exists location_products (

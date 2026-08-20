@@ -15,8 +15,12 @@ const DEMO = {
     { id: 'p2', supplier_id: 's1', name: 'Салфетки 33*33 2сл. зеленые', category: 'Салфетки', unit: 'шт', price: 290, payment_note: 'оплата с кассы' },
     { id: 'p3', supplier_id: 's1', name: 'Туал.бумага Delicate Care 2сл, 12шт', category: 'Салфетки', unit: 'упк', price: 1248, payment_note: 'оплата с кассы' },
     { id: 'p4', supplier_id: 's2', name: 'Сахар стики 5г', category: 'Кухня', unit: 'шт', price: 1, payment_note: '' },
-    { id: 'p5', supplier_id: 's2', name: 'Ведро 850мл, 120шт', category: 'Одноразовая посуда', unit: 'упк', price: 1900, payment_note: '' },
+    { id: 'p5', supplier_id: 's2', name: 'Ведро 850мл, 120шт', category: 'Одноразовая посуда', unit: 'упк', price: 1900, payment_note: '', hint: 'К этому ведру нужна отдельная крышка — не забудьте добавить её в заказ' },
   ],
+}
+
+function localId() {
+  return (crypto && crypto.randomUUID) ? crypto.randomUUID() : 'local-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2)
 }
 
 function useDataStore() {
@@ -29,10 +33,12 @@ function useDataStore() {
 
   const reload = useCallback(async () => {
     if (!supabaseReady) {
-      setLocations(DEMO.locations)
-      setSuppliers(DEMO.suppliers)
-      setProducts(DEMO.products)
-      setLocationProducts([])
+      // Demo/local mode: only seed once. Reload must NOT stomp on rows the
+      // person has already added locally — that was the bug where an
+      // import or an edit appeared to "undo itself" a second later.
+      setLocations((prev) => (prev.length ? prev : DEMO.locations))
+      setSuppliers((prev) => (prev.length ? prev : DEMO.suppliers))
+      setProducts((prev) => (prev.length ? prev : DEMO.products))
       setLoading(false)
       return
     }
@@ -87,7 +93,89 @@ function useDataStore() {
     }
   }, [])
 
-  return { locations, suppliers, products, locationProducts, settings, loading, reload, setSettings, loadLastOrder }
+  // Frequency ranking: looks at recent finished orders for this location
+  // and counts how often each product appeared, so the order screen can
+  // surface a "часто заказываете" quick-add row — the single biggest lever
+  // for cutting manual input on recurring purchases, since most items
+  // people buy are the same handful every time.
+  const loadFrequentProducts = useCallback(async (locationId) => {
+    if (!supabaseReady || !locationId) return []
+    const { data, error } = await supabase
+      .from('order_items')
+      .select('product_id, orders!inner(location_id, status, finished_at)')
+      .eq('orders.location_id', locationId)
+      .eq('orders.status', 'finished')
+      .order('finished_at', { ascending: false, foreignTable: 'orders' })
+      .limit(400)
+    if (error || !data) return []
+    const counts = new Map()
+    for (const row of data) {
+      if (!row.product_id) continue
+      counts.set(row.product_id, (counts.get(row.product_id) || 0) + 1)
+    }
+    return [...counts.entries()].sort((a, b) => b[1] - a[1]).map(([id]) => id)
+  }, [])
+
+  // --- Generic CRUD helpers -------------------------------------------
+  // When Supabase is connected, every write goes through it and the store
+  // re-syncs from the source of truth. When it's not connected (demo/local
+  // mode), the same call just edits local state directly instead of being
+  // silently dropped and overwritten by the next reload().
+  const addLocation = useCallback(async (row) => {
+    if (supabaseReady) { await supabase.from('locations').insert(row); await reload() }
+    else setLocations((prev) => [...prev, { id: localId(), sort_order: prev.length, ...row }])
+  }, [reload])
+  const updateLocation = useCallback(async (id, field, value) => {
+    if (supabaseReady) { await supabase.from('locations').update({ [field]: value }).eq('id', id); await reload() }
+    else setLocations((prev) => prev.map((l) => (l.id === id ? { ...l, [field]: value } : l)))
+  }, [reload])
+  const removeLocation = useCallback(async (id) => {
+    if (supabaseReady) { await supabase.from('locations').delete().eq('id', id); await reload() }
+    else setLocations((prev) => prev.filter((l) => l.id !== id))
+  }, [reload])
+
+  const addSupplier = useCallback(async (row) => {
+    if (supabaseReady) { await supabase.from('suppliers').insert(row); await reload() }
+    else setSuppliers((prev) => [...prev, { id: localId(), sort_order: prev.length, ...row }])
+  }, [reload])
+  const updateSupplier = useCallback(async (id, field, value) => {
+    if (supabaseReady) { await supabase.from('suppliers').update({ [field]: value }).eq('id', id); await reload() }
+    else setSuppliers((prev) => prev.map((s) => (s.id === id ? { ...s, [field]: value } : s)))
+  }, [reload])
+  const removeSupplier = useCallback(async (id) => {
+    if (supabaseReady) { await supabase.from('suppliers').delete().eq('id', id); await reload() }
+    else setSuppliers((prev) => prev.filter((s) => s.id !== id))
+  }, [reload])
+
+  const addProduct = useCallback(async (row) => {
+    if (supabaseReady) { await supabase.from('products').insert(row); await reload() }
+    else setProducts((prev) => [...prev, { id: localId(), sort_order: prev.length, is_archived: false, ...row }])
+  }, [reload])
+  const addProductsBulk = useCallback(async (rows) => {
+    if (supabaseReady) { await supabase.from('products').insert(rows); await reload() }
+    else setProducts((prev) => [...prev, ...rows.map((r) => ({ id: localId(), is_archived: false, ...r }))])
+  }, [reload])
+  const updateProduct = useCallback(async (id, field, value) => {
+    if (supabaseReady) { await supabase.from('products').update({ [field]: value }).eq('id', id); await reload() }
+    else setProducts((prev) => prev.map((p) => (p.id === id ? { ...p, [field]: value } : p)))
+  }, [reload])
+  const removeProduct = useCallback(async (id) => {
+    if (supabaseReady) { await supabase.from('products').delete().eq('id', id); await reload() }
+    else setProducts((prev) => prev.filter((p) => p.id !== id))
+  }, [reload])
+
+  const saveSettings = useCallback(async (patch) => {
+    if (supabaseReady) { await supabase.from('app_settings').update(patch).eq('id', 1); await reload() }
+    else setSettings((prev) => ({ ...prev, ...patch }))
+  }, [reload])
+
+  return {
+    locations, suppliers, products, locationProducts, settings, loading, reload, setSettings, loadLastOrder, loadFrequentProducts,
+    addLocation, updateLocation, removeLocation,
+    addSupplier, updateSupplier, removeSupplier,
+    addProduct, addProductsBulk, updateProduct, removeProduct,
+    saveSettings,
+  }
 }
 
 function money(n) {
@@ -114,6 +202,57 @@ function IconCheck() {
 }
 function IconInfo() {
   return <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.3" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="9" /><path d="M12 11v5.5M12 8v.01" /></svg>
+}
+function IconLink() {
+  return <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round"><path d="M10 13a5 5 0 0 0 7.5.5l2-2a5 5 0 0 0-7-7l-1.5 1.5" /><path d="M14 11a5 5 0 0 0-7.5-.5l-2 2a5 5 0 0 0 7 7l1.5-1.5" /></svg>
+}
+function IconStar() {
+  return <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M12 2.5l2.9 6.3 6.9.8-5.1 4.8 1.4 6.9-6.1-3.5-6.1 3.5 1.4-6.9-5.1-4.8 6.9-.8z" /></svg>
+}
+function IconWhatsApp() {
+  return <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M12.02 2C6.5 2 2 6.48 2 12c0 1.85.5 3.58 1.38 5.07L2 22l5.08-1.33A9.96 9.96 0 0 0 12.02 22C17.53 22 22 17.52 22 12S17.53 2 12.02 2zm0 18.13c-1.63 0-3.15-.44-4.46-1.22l-.32-.19-3.02.79.81-2.94-.2-.3A8.1 8.1 0 0 1 3.87 12c0-4.5 3.66-8.15 8.15-8.15S20.16 7.5 20.16 12s-3.65 8.13-8.14 8.13zm4.47-6.1c-.24-.12-1.44-.71-1.66-.79-.22-.08-.39-.12-.55.12-.16.24-.63.79-.78.95-.14.16-.28.18-.53.06-.24-.12-1.02-.38-1.94-1.2-.72-.64-1.2-1.43-1.34-1.67-.14-.24-.02-.37.11-.49.11-.11.24-.28.36-.42.12-.14.16-.24.24-.4.08-.16.04-.3-.02-.42-.06-.12-.55-1.33-.76-1.82-.2-.48-.4-.42-.55-.42-.14-.01-.3-.01-.46-.01a.9.9 0 0 0-.65.3c-.22.24-.85.83-.85 2.03 0 1.2.87 2.35 1 2.51.12.16 1.71 2.61 4.14 3.66.58.25 1.03.4 1.38.51.58.18 1.11.16 1.53.1.47-.07 1.44-.59 1.64-1.16.2-.57.2-1.06.14-1.16-.06-.1-.22-.16-.46-.28z" /></svg>
+}
+function IconSun() {
+  return <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="4.5" /><path d="M12 2.5v2.4M12 19.1v2.4M4.9 4.9l1.7 1.7M17.4 17.4l1.7 1.7M2.5 12h2.4M19.1 12h2.4M4.9 19.1l1.7-1.7M17.4 6.6l1.7-1.7" /></svg>
+}
+function IconMoon() {
+  return <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M20.5 14.5A8.5 8.5 0 1 1 9.5 3.5a7 7 0 0 0 11 11z" /></svg>
+}
+
+// Small emoji icon per category, matched by keyword — purely decorative,
+// helps people scan the list visually instead of reading every label.
+const CATEGORY_ICON_RULES = [
+  [/салфет|туал.{0,3}бумаг|полотенц/i, '🧻'],
+  [/посуд|тарел|стакан|ведр|крышк|контейнер/i, '🥡'],
+  [/кухн|специ|сахар|соль|масло|мука/i, '🍳'],
+  [/напит|вода|сок|кофе|чай|стик/i, '🥤'],
+  [/овощ|фрукт|зелен|лимон/i, '🥦'],
+  [/мясо|курин|говя|фарш/i, '🥩'],
+  [/рыба|морепрод/i, '🐟'],
+  [/молок|сыр|йогурт|сливк/i, '🥛'],
+  [/хоз|моющ|перчат|мешк|губк/i, '🧴'],
+  [/хлеб|выпечк/i, '🍞'],
+]
+function categoryIcon(cat) {
+  if (!cat) return '📦'
+  for (const [re, icon] of CATEGORY_ICON_RULES) if (re.test(cat)) return icon
+  return '📦'
+}
+
+// Turns a stored contact string ("8 (777) 805 8098") into a wa.me-friendly
+// international number. Kazakhstan mobile numbers start with 8 locally but
+// need the country code 7 for WhatsApp deep links.
+function phoneToWaDigits(contact) {
+  const digits = (contact || '').replace(/\D/g, '')
+  if (!digits) return ''
+  if (digits.length === 11 && digits.startsWith('8')) return '7' + digits.slice(1)
+  if (digits.length === 10) return '7' + digits
+  return digits
+}
+function buildSupplierWaMessage(locationName, items) {
+  const lines = items.map((it) => `• ${it.product_name} — ${it.quantity} ${it.unit}`)
+  const total = items.reduce((s, it) => s + it.quantity * it.price, 0)
+  return `Здравствуйте! Заявка на закуп${locationName ? ` (${locationName})` : ''}:\n\n${lines.join('\n')}\n\nИтого: ${money(total)} ₸`
 }
 
 function Stepper({ qty, onChange, size = 'md' }) {
@@ -151,8 +290,20 @@ export default function App() {
   const [lastOrderInfo, setLastOrderInfo] = useState(null)
   const [repeatBusy, setRepeatBusy] = useState(false)
   const [toast, setToast] = useState(null)
+  const [frequentIds, setFrequentIds] = useState([])
+  const [theme, setTheme] = useState(() => {
+    if (typeof window === 'undefined') return 'light'
+    const saved = window.localStorage.getItem('zakup-theme')
+    if (saved) return saved
+    return window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+  })
   const toastTimer = useRef(null)
   const ticketRef = useRef(null)
+
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme)
+    window.localStorage.setItem('zakup-theme', theme)
+  }, [theme])
 
   useEffect(() => {
     if (!locationId && locations.length) setLocationId(locations[0].id)
@@ -160,16 +311,38 @@ export default function App() {
 
   useEffect(() => {
     setLastOrderInfo(null)
+    setFrequentIds([])
     setCategoryFilter('')
     setCollapsed({})
-    if (locationId) store.loadLastOrder(locationId).then((res) => setLastOrderInfo(res))
+    if (locationId) {
+      store.loadLastOrder(locationId).then((res) => setLastOrderInfo(res))
+      store.loadFrequentProducts(locationId).then((ids) => setFrequentIds(ids))
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [locationId])
 
-  function showToast(text, type = 'success') {
-    setToast({ text, type })
+  function showToast(text, type = 'success', action = null) {
+    setToast({ text, type, action })
     clearTimeout(toastTimer.current)
-    toastTimer.current = setTimeout(() => setToast(null), 2600)
+    toastTimer.current = setTimeout(() => setToast(null), action ? 6000 : 2600)
+  }
+
+  // Hints are written like `...«Точное или частичное название товара»`.
+  // When a product with such a hint gets added to the cart for the first
+  // time, look up the referenced product so we can offer to add it too —
+  // this is what actually solves "I ordered buckets but forgot the lids".
+  const normalize = (s) => (s || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim()
+  function findPairedProduct(product) {
+    if (!product.hint) return null
+    const match = product.hint.match(/«([^»]+)»/)
+    if (!match) return null
+    const target = normalize(match[1])
+    if (!target) return null
+    return products.find((p) => {
+      if (p.id === product.id) return false
+      const n = normalize(p.name)
+      return n === target || n.includes(target) || target.includes(n)
+    }) || null
   }
 
   const cart = carts[locationId] || []
@@ -177,29 +350,41 @@ export default function App() {
 
   const supplierById = useMemo(() => Object.fromEntries(suppliers.map((s) => [s.id, s])), [suppliers])
 
-  const visibleProducts = useMemo(() => {
+  // Products scoped to the selected location (catalog override applied),
+  // independent of the search box — this is what the "frequently ordered"
+  // row draws from, so it still works while the person is mid-search.
+  const locationScopedProducts = useMemo(() => {
     const scoped = locationProducts.filter((lp) => lp.location_id === locationId)
     const hasScope = scoped.length > 0
     const scopedIds = new Set(scoped.map((lp) => lp.product_id))
     const overrideById = Object.fromEntries(scoped.map((lp) => [lp.product_id, lp.price_override]))
-
-    let list = products.filter((p) => (hasScope ? scopedIds.has(p.id) : true))
-    if (query.trim()) {
-      const q = query.trim().toLowerCase()
-      list = list.filter((p) => {
-        const sup = supplierById[p.supplier_id]
-        return (
-          p.name.toLowerCase().includes(q) ||
-          (p.category || '').toLowerCase().includes(q) ||
-          (sup?.name || '').toLowerCase().includes(q)
-        )
-      })
-    }
+    const list = products.filter((p) => (hasScope ? scopedIds.has(p.id) : true))
     return list.map((p) => ({
       ...p,
       effective_price: overrideById[p.id] != null ? overrideById[p.id] : p.price,
     }))
-  }, [products, locationProducts, locationId, query, supplierById])
+  }, [products, locationProducts, locationId])
+
+  const visibleProducts = useMemo(() => {
+    if (!query.trim()) return locationScopedProducts
+    const q = query.trim().toLowerCase()
+    return locationScopedProducts.filter((p) => {
+      const sup = supplierById[p.supplier_id]
+      return (
+        p.name.toLowerCase().includes(q) ||
+        (p.category || '').toLowerCase().includes(q) ||
+        (sup?.name || '').toLowerCase().includes(q)
+      )
+    })
+  }, [locationScopedProducts, query, supplierById])
+
+  // Top ~8 products by how often they showed up in past finished orders
+  // for this location, ready to add with a single tap.
+  const frequentProducts = useMemo(() => {
+    if (!frequentIds.length) return []
+    const byId = Object.fromEntries(locationScopedProducts.map((p) => [p.id, p]))
+    return frequentIds.map((id) => byId[id]).filter(Boolean).slice(0, 8)
+  }, [frequentIds, locationScopedProducts])
 
   // Products grouped Поставщик -> Категория -> Товары.
   const groupedBySupplier = useMemo(() => {
@@ -255,6 +440,7 @@ export default function App() {
 
   function setQty(product, qty) {
     const sup = supplierById[product.supplier_id]
+    const isNewAddition = qty > 0 && !cartById[product.id]
     setCarts((prev) => {
       const list = prev[locationId] ? [...prev[locationId]] : []
       const idx = list.findIndex((it) => it.product_id === product.id)
@@ -279,6 +465,15 @@ export default function App() {
       }
       return { ...prev, [locationId]: list }
     })
+    if (isNewAddition) {
+      const paired = findPairedProduct(product)
+      if (paired && !cartById[paired.id]) {
+        showToast(`«${product.name}» добавлен. ${product.hint}`, 'suggest', {
+          label: `+ ${paired.name}`,
+          onClick: () => setQty({ ...paired, effective_price: paired.price }, 1),
+        })
+      }
+    }
   }
 
   function setCartItemQty(product_id, qty) {
@@ -330,6 +525,19 @@ export default function App() {
     else exportPDF(payload)
   }
 
+  // Sends just one supplier's items straight to their WhatsApp as a
+  // ready-to-read message — replaces retyping the order by hand into chat.
+  function sendSupplierWhatsApp(items) {
+    const digits = phoneToWaDigits(items[0]?.supplier_contact)
+    const text = buildSupplierWaMessage(currentLocation?.name, items)
+    const url = `https://wa.me/${digits}?text=${encodeURIComponent(text)}`
+    window.open(url, '_blank', 'noopener')
+  }
+
+  function toggleTheme() {
+    setTheme((t) => (t === 'dark' ? 'light' : 'dark'))
+  }
+
   async function finishOrder() {
     if (!cart.length) return
     if (supabaseReady) {
@@ -361,11 +569,21 @@ export default function App() {
           <button className={`tab-btn ${view === 'order' ? 'active' : ''}`} onClick={() => setView('order')}>Заказ</button>
           <button className={`tab-btn ${view === 'settings' ? 'active' : ''}`} onClick={() => setView('settings')}>Настройки</button>
         </nav>
+        <button
+          type="button"
+          className="theme-toggle"
+          onClick={toggleTheme}
+          title={theme === 'dark' ? 'Включить светлую тему' : 'Включить тёмную тему'}
+          aria-label="Переключить тему"
+        >
+          {theme === 'dark' ? <IconSun /> : <IconMoon />}
+        </button>
       </div>
 
       {!supabaseReady && (
         <div className="notice">
-          Supabase не подключён — работает демо-режим (данные не сохраняются). Заполните <code>.env</code> по образцу <code>.env.example</code> и подключите проект Supabase (см. README).
+          <IconInfo />
+          <span>Supabase не подключён — работает демо-режим (данные не сохраняются). Заполните <code>.env</code> по образцу <code>.env.example</code> и подключите проект Supabase (см. README).</span>
         </div>
       )}
 
@@ -406,6 +624,30 @@ export default function App() {
                 )}
               </div>
             </div>
+            {frequentProducts.length > 0 && !query && !categoryFilter && (
+              <div className="frequent-row">
+                <div className="frequent-label"><IconStar /> Часто заказываете</div>
+                <div className="frequent-chips">
+                  {frequentProducts.map((p) => {
+                    const inCart = cartById[p.id]
+                    const qty = inCart ? inCart.quantity : 0
+                    return (
+                      <button
+                        type="button"
+                        key={p.id}
+                        className={`frequent-chip ${qty > 0 ? 'active' : ''}`}
+                        onClick={() => setQty(p, qty + 1)}
+                        title="Добавить 1 шт"
+                      >
+                        <span className="fc-name">{p.name}</span>
+                        <span className="fc-price">{money(p.effective_price)} ₸</span>
+                        {qty > 0 && <span className="fc-qty">×{qty}</span>}
+                      </button>
+                    )
+                  })}
+                </div>
+              </div>
+            )}
             <div className="search-row">
               <span className="search-icon"><IconSearch /></span>
               <input
@@ -464,6 +706,7 @@ export default function App() {
                           return (
                             <div className="category-group" key={cat}>
                               <div className="category-head">
+                                <span className="category-icon" aria-hidden="true">{categoryIcon(cat)}</span>
                                 <span className="category-name">{cat}</span>
                                 <span className="category-count">{list.length}</span>
                                 {inCartCount > 0 && <span className="category-badge">{inCartCount} в списке</span>}
@@ -476,6 +719,7 @@ export default function App() {
                                     <div className={`product-row ${qty > 0 ? 'in-cart' : ''}`} key={p.id}>
                                       <div className="product-info">
                                         <div className="name">{p.name}</div>
+                                        {p.hint && <div className="hint"><IconLink /> {p.hint}</div>}
                                       </div>
                                       <div className="price">{money(p.effective_price)} ₸<span className="unit">/{p.unit}</span></div>
                                       {qty > 0 ? (
@@ -512,7 +756,19 @@ export default function App() {
               )}
               {groupedCart.map(([supplierName, items]) => (
                 <div className="ticket-group" key={supplierName}>
-                  <div className="supplier-name">{supplierName}</div>
+                  <div className="ticket-group-head">
+                    <div className="supplier-name">{supplierName}</div>
+                    {items[0]?.supplier_contact && (
+                      <button
+                        type="button"
+                        className="wa-btn"
+                        onClick={() => sendSupplierWhatsApp(items)}
+                        title={`Отправить заказ «${supplierName}» в WhatsApp`}
+                      >
+                        <IconWhatsApp /> WhatsApp
+                      </button>
+                    )}
+                  </div>
                   {items.map((it) => (
                     <div className="ticket-item" key={it.product_id}>
                       <span className="ti-name">{it.product_name}</span>
@@ -557,8 +813,17 @@ export default function App() {
 
       {toast && (
         <div className={`toast toast-${toast.type}`}>
-          <span className="toast-icon">{toast.type === 'success' ? <IconCheck /> : <IconInfo />}</span>
-          {toast.text}
+          <span className="toast-icon">{toast.type === 'success' ? <IconCheck /> : toast.type === 'suggest' ? <IconLink /> : <IconInfo />}</span>
+          <span className="toast-text">{toast.text}</span>
+          {toast.action && (
+            <button
+              type="button"
+              className="toast-action"
+              onClick={() => { toast.action.onClick(); setToast(null) }}
+            >
+              {toast.action.label}
+            </button>
+          )}
         </div>
       )}
 
@@ -567,11 +832,16 @@ export default function App() {
   )
 }
 
+function IconWarning() {
+  return <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M10.3 3.9L1.9 18a1.6 1.6 0 0 0 1.4 2.4h17.4a1.6 1.6 0 0 0 1.4-2.4L13.7 3.9a1.6 1.6 0 0 0-2.8 0z" /><path d="M12 9v4.5M12 17v.01" /></svg>
+}
+
 function ConfirmDialog({ open, title, message, confirmLabel = 'Удалить', onCancel, onConfirm }) {
   if (!open) return null
   return (
     <div className="modal-backdrop" onClick={onCancel}>
       <div className="modal-card" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
+        <div className="modal-icon"><IconWarning /></div>
         <div className="modal-title">{title}</div>
         {message && <div className="modal-message">{message}</div>}
         <div className="modal-actions">
@@ -621,24 +891,21 @@ function Settings({ store }) {
 }
 
 function LocationsTab({ store }) {
-  const { locations, reload } = store
+  const { locations, addLocation, updateLocation, removeLocation } = store
   const [name, setName] = useState('')
   const [confirmTarget, setConfirmTarget] = useState(null)
 
   async function add() {
     if (!name.trim()) return
-    if (supabaseReady) await supabase.from('locations').insert({ name: name.trim(), sort_order: locations.length })
+    await addLocation({ name: name.trim() })
     setName('')
-    reload()
   }
   async function remove(id) {
-    if (supabaseReady) await supabase.from('locations').delete().eq('id', id)
+    await removeLocation(id)
     setConfirmTarget(null)
-    reload()
   }
   async function rename(id, value) {
-    if (supabaseReady) await supabase.from('locations').update({ name: value }).eq('id', id)
-    reload()
+    await updateLocation(id, 'name', value)
   }
 
   return (
@@ -673,25 +940,22 @@ function LocationsTab({ store }) {
 }
 
 function SuppliersTab({ store }) {
-  const { suppliers, reload } = store
+  const { suppliers, addSupplier, updateSupplier, removeSupplier } = store
   const [form, setForm] = useState({ name: '', contact: '', note: '' })
   const [confirmTarget, setConfirmTarget] = useState(null)
   const [q, setQ] = useState('')
 
   async function add() {
     if (!form.name.trim()) return
-    if (supabaseReady) await supabase.from('suppliers').insert({ ...form, sort_order: suppliers.length })
+    await addSupplier({ ...form })
     setForm({ name: '', contact: '', note: '' })
-    reload()
   }
   async function remove(id) {
-    if (supabaseReady) await supabase.from('suppliers').delete().eq('id', id)
+    await removeSupplier(id)
     setConfirmTarget(null)
-    reload()
   }
   async function update(id, field, value) {
-    if (supabaseReady) await supabase.from('suppliers').update({ [field]: value }).eq('id', id)
-    reload()
+    await updateSupplier(id, field, value)
   }
 
   function onKeyDown(e) { if (e.key === 'Enter') add() }
@@ -745,10 +1009,10 @@ function SuppliersTab({ store }) {
 }
 
 const COMMON_UNITS = ['шт', 'кг', 'л', 'упк', 'уп', 'пачка', 'г', 'мл', 'ящик']
-const emptyProductForm = { name: '', supplier_id: '', category: '', unit: 'шт', price: '', payment_note: '' }
+const emptyProductForm = { name: '', supplier_id: '', category: '', unit: 'шт', price: '', payment_note: '', hint: '' }
 
 function ProductsTab({ store }) {
-  const { products, suppliers, reload } = store
+  const { products, suppliers, addProduct, addProductsBulk, updateProduct, removeProduct } = store
   const [form, setForm] = useState(emptyProductForm)
   const [importStatus, setImportStatus] = useState(null)
   const [confirmTarget, setConfirmTarget] = useState(null)
@@ -778,26 +1042,20 @@ function ProductsTab({ store }) {
 
   async function add() {
     if (!form.name.trim()) return
-    if (supabaseReady) {
-      await supabase.from('products').insert({
-        ...form,
-        supplier_id: form.supplier_id || null,
-        price: Number(form.price) || 0,
-        sort_order: products.length,
-      })
-    }
+    await addProduct({
+      ...form,
+      supplier_id: form.supplier_id || null,
+      price: Number(form.price) || 0,
+    })
     setForm(emptyProductForm)
     nameInputRef.current?.focus()
-    reload()
   }
   async function remove(id) {
-    if (supabaseReady) await supabase.from('products').delete().eq('id', id)
+    await removeProduct(id)
     setConfirmTarget(null)
-    reload()
   }
   async function update(id, field, value) {
-    if (supabaseReady) await supabase.from('products').update({ [field]: value }).eq('id', id)
-    reload()
+    await updateProduct(id, field, value)
   }
   function duplicateToForm(p) {
     setForm({
@@ -807,27 +1065,55 @@ function ProductsTab({ store }) {
       unit: p.unit || 'шт',
       price: p.price ?? '',
       payment_note: p.payment_note || '',
+      hint: p.hint || '',
     })
     nameInputRef.current?.focus()
     nameInputRef.current?.select()
   }
   function onKeyDown(e) { if (e.key === 'Enter') add() }
 
-  // Bulk import from CSV: name,category,unit,price,supplier,payment_note
+  // Bulk import from CSV: name,category,unit,price,supplier,payment_note,hint
   // Lets a large price list be filled in one go instead of typing every
   // product by hand.
   function downloadTemplate() {
-    const csv = 'name,category,unit,price,supplier,payment_note\nСалфетки 24*24,Салфетки,шт,124,Карина,оплата с кассы\n'
+    const csv = 'name,category,unit,price,supplier,payment_note,hint\n'
+      + 'Салфетки 24*24,Салфетки,шт,124,Карина,оплата с кассы,\n'
+      + '"Ведро 0,85л",Супницы пластиковые,уп,8400,TGR,,"К этому ведру нужна отдельная крышка"\n'
     const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url; a.download = 'шаблон_товаров.csv'; a.click()
     URL.revokeObjectURL(url)
   }
+  // Proper-ish CSV line splitter: respects double-quoted fields so commas
+  // inside a quoted value (e.g. a price note or a decimal like "0,85л")
+  // don't break the row into extra columns. Doubled quotes ("") decode to a
+  // literal quote, per the usual CSV convention.
+  function splitCsvLine(line) {
+    const out = []
+    let cur = ''
+    let inQuotes = false
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i]
+      if (inQuotes) {
+        if (ch === '"') {
+          if (line[i + 1] === '"') { cur += '"'; i++ } else { inQuotes = false }
+        } else cur += ch
+      } else if (ch === '"') {
+        inQuotes = true
+      } else if (ch === ',') {
+        out.push(cur); cur = ''
+      } else {
+        cur += ch
+      }
+    }
+    out.push(cur)
+    return out.map((c) => c.trim())
+  }
   function parseCsv(text) {
     const lines = text.split(/\r?\n/).filter((l) => l.trim().length)
     if (!lines.length) return []
-    const rows = lines.map((line) => line.split(',').map((c) => c.trim().replace(/^"|"$/g, '')))
+    const rows = lines.map(splitCsvLine)
     const header = rows[0].map((h) => h.toLowerCase())
     return rows.slice(1).map((cols) => Object.fromEntries(header.map((h, i) => [h, cols[i] || ''])))
   }
@@ -846,12 +1132,12 @@ function ProductsTab({ store }) {
           price: Number(r.price) || 0,
           supplier_id: supplierByName[(r.supplier || '').toLowerCase()] || null,
           payment_note: r.payment_note || '',
+          hint: r.hint || '',
           sort_order: products.length + i,
         }))
       if (!toInsert.length) { setImportStatus('В файле не найдено строк с товарами'); return }
-      if (supabaseReady) await supabase.from('products').insert(toInsert)
+      await addProductsBulk(toInsert)
       setImportStatus(`Добавлено товаров: ${toInsert.length}`)
-      reload()
     } catch (err) {
       setImportStatus('Не удалось прочитать файл — проверьте формат CSV')
     } finally {
@@ -882,6 +1168,7 @@ function ProductsTab({ store }) {
         <input list="units-list" placeholder="ед (шт/кг/л)" value={form.unit} onChange={(e) => setForm((f) => ({ ...f, unit: e.target.value }))} onKeyDown={onKeyDown} />
         <input placeholder="Цена, тг" type="number" inputMode="decimal" value={form.price} onChange={(e) => setForm((f) => ({ ...f, price: e.target.value }))} onKeyDown={onKeyDown} />
         <input placeholder="Примечание к оплате" value={form.payment_note} onChange={(e) => setForm((f) => ({ ...f, payment_note: e.target.value }))} onKeyDown={onKeyDown} />
+        <input placeholder="Подсказка (напр. «нужна крышка»)" value={form.hint} onChange={(e) => setForm((f) => ({ ...f, hint: e.target.value }))} onKeyDown={onKeyDown} />
         <button className="btn primary" onClick={add}>Добавить товар</button>
       </div>
       <datalist id="categories-list">{categories.map((c) => <option value={c} key={c} />)}</datalist>
@@ -892,6 +1179,10 @@ function ProductsTab({ store }) {
         <button className="btn ghost small" onClick={() => fileInputRef.current?.click()}>Импорт товаров из CSV</button>
         <input ref={fileInputRef} type="file" accept=".csv" hidden onChange={(e) => e.target.files[0] && importCsvFile(e.target.files[0])} />
         {importStatus && <span className="import-status">{importStatus}</span>}
+      </div>
+      <div className="hint-explainer">
+        <IconLink /> Колонка «Подсказка» — необязательная короткая заметка под товаром в списке заказа. Полезна для парных товаров:
+        например у ведра укажите «нужна крышка», а у крышки — «подходит к ведру 0,85л».
       </div>
 
       {products.length > 6 && (
@@ -904,7 +1195,7 @@ function ProductsTab({ store }) {
 
       <div className="table-scroll">
         <table className="data-table">
-          <thead><tr><th>Товар</th><th>Поставщик</th><th>Категория</th><th>ед</th><th>тг</th><th>Примечание</th><th></th></tr></thead>
+          <thead><tr><th>Товар</th><th>Поставщик</th><th>Категория</th><th>ед</th><th>тг</th><th>Примечание</th><th>Подсказка</th><th></th></tr></thead>
           <tbody>
             {filtered.map((p) => (
               <tr key={p.id}>
@@ -919,14 +1210,15 @@ function ProductsTab({ store }) {
                 <td><input list="units-list" defaultValue={p.unit} onBlur={(e) => e.target.value !== p.unit && update(p.id, 'unit', e.target.value)} style={{ border: 'none', background: 'transparent', font: 'inherit', width: 56 }} /></td>
                 <td><input defaultValue={p.price} type="number" onBlur={(e) => Number(e.target.value) !== p.price && update(p.id, 'price', Number(e.target.value))} style={{ border: 'none', background: 'transparent', font: 'inherit', width: 64 }} /></td>
                 <td><input defaultValue={p.payment_note} onBlur={(e) => e.target.value !== p.payment_note && update(p.id, 'payment_note', e.target.value)} style={{ border: 'none', background: 'transparent', font: 'inherit', width: '100%' }} /></td>
+                <td><input defaultValue={p.hint} placeholder="—" onBlur={(e) => e.target.value !== p.hint && update(p.id, 'hint', e.target.value)} style={{ border: 'none', background: 'transparent', font: 'inherit', width: '100%' }} /></td>
                 <td style={{ whiteSpace: 'nowrap' }}>
                   <button className="dup-link" onClick={() => duplicateToForm(p)} title="Заполнить форму данными этого товара, чтобы быстро добавить похожий">дублировать</button>
                   <button className="del-link" onClick={() => setConfirmTarget(p)}>удалить</button>
                 </td>
               </tr>
             ))}
-            {products.length === 0 && <tr><td colSpan={7} style={{ color: 'var(--ink-soft)', textAlign: 'center', padding: 20 }}>Товаров пока нет — добавьте вручную или импортируйте CSV</td></tr>}
-            {products.length > 0 && filtered.length === 0 && <tr><td colSpan={7} style={{ color: 'var(--ink-soft)', textAlign: 'center', padding: 20 }}>Ничего не найдено по запросу «{q}»</td></tr>}
+            {products.length === 0 && <tr><td colSpan={8} style={{ color: 'var(--ink-soft)', textAlign: 'center', padding: 20 }}>Товаров пока нет — добавьте вручную или импортируйте CSV</td></tr>}
+            {products.length > 0 && filtered.length === 0 && <tr><td colSpan={8} style={{ color: 'var(--ink-soft)', textAlign: 'center', padding: 20 }}>Ничего не найдено по запросу «{q}»</td></tr>}
           </tbody>
         </table>
       </div>
@@ -942,16 +1234,14 @@ function ProductsTab({ store }) {
 }
 
 function ReportTab({ store }) {
-  const { settings, setSettings, reload } = store
+  const { settings, saveSettings } = store
   const [local, setLocal] = useState(settings)
   const [saved, setSaved] = useState(false)
 
   useEffect(() => setLocal(settings), [settings])
 
   async function save() {
-    if (supabaseReady) await supabase.from('app_settings').update(local).eq('id', 1)
-    setSettings(local)
-    reload()
+    await saveSettings(local)
     setSaved(true)
     setTimeout(() => setSaved(false), 2000)
   }
