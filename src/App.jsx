@@ -3,8 +3,8 @@ import { supabase, supabaseReady } from './supabaseClient'
 
 const DEMO = {
   locations: [
-    { id: 'demo-afro', name: 'AFRO' },
-    { id: 'demo-karina', name: 'Karina' },
+    { id: 'demo-afro', name: 'AFRO', pin: '1111' },
+    { id: 'demo-karina', name: 'Karina', pin: '2222' },
   ],
   suppliers: [
     { id: 's1', name: 'Карина', contact: '8 (777) 805 8098', note: 'оплата с кассы' },
@@ -28,7 +28,8 @@ function useDataStore() {
   const [suppliers, setSuppliers] = useState([])
   const [products, setProducts] = useState([])
   const [locationProducts, setLocationProducts] = useState([])
-  const [settings, setSettings] = useState({ report_filename_template: 'ЗАКУП_{location}_{date}', company_name: '' })
+  const [stockLevels, setStockLevels] = useState([])
+  const [settings, setSettings] = useState({ report_filename_template: 'ЗАКУП_{location}_{date}', company_name: '', kitchen_pin: '' })
   const [loading, setLoading] = useState(true)
 
   const reload = useCallback(async () => {
@@ -43,30 +44,33 @@ function useDataStore() {
       return
     }
     setLoading(true)
-    const [loc, sup, prod, lp, st] = await Promise.all([
+    const [loc, sup, prod, lp, st, sl] = await Promise.all([
       supabase.from('locations').select('*').order('sort_order').order('name'),
       supabase.from('suppliers').select('*').order('sort_order').order('name'),
       supabase.from('products').select('*').eq('is_archived', false).order('sort_order').order('name'),
       supabase.from('location_products').select('*'),
       supabase.from('app_settings').select('*').eq('id', 1).maybeSingle(),
+      supabase.from('stock_levels').select('*'),
     ])
     setLocations(loc.data || [])
     setSuppliers(sup.data || [])
     setProducts(prod.data || [])
     setLocationProducts(lp.data || [])
     if (st.data) setSettings(st.data)
+    setStockLevels(sl.data || [])
     setLoading(false)
   }, [])
 
   useEffect(() => { reload() }, [reload])
 
-  const loadLastOrder = useCallback(async (locationId) => {
+  const loadLastOrder = useCallback(async (locationId, source = 'main') => {
     if (!supabaseReady || !locationId) return null
     const { data: order } = await supabase
       .from('orders')
       .select('*')
       .eq('location_id', locationId)
       .eq('status', 'finished')
+      .eq('source', source)
       .order('finished_at', { ascending: false })
       .limit(1)
       .maybeSingle()
@@ -98,13 +102,14 @@ function useDataStore() {
   // surface a "часто заказываете" quick-add row — the single biggest lever
   // for cutting manual input on recurring purchases, since most items
   // people buy are the same handful every time.
-  const loadFrequentProducts = useCallback(async (locationId) => {
+  const loadFrequentProducts = useCallback(async (locationId, source = 'main') => {
     if (!supabaseReady || !locationId) return []
     const { data, error } = await supabase
       .from('order_items')
-      .select('product_id, orders!inner(location_id, status, finished_at)')
+      .select('product_id, orders!inner(location_id, status, finished_at, source)')
       .eq('orders.location_id', locationId)
       .eq('orders.status', 'finished')
+      .eq('orders.source', source)
       .order('finished_at', { ascending: false, foreignTable: 'orders' })
       .limit(400)
     if (error || !data) return []
@@ -169,12 +174,129 @@ function useDataStore() {
     else setSettings((prev) => ({ ...prev, ...patch }))
   }, [reload])
 
+  // Order limit per (location, product) — stored on location_products so it
+  // can live alongside the existing price override. Upsert keeps whichever
+  // price_override was already there if one exists.
+  const setLocationProductLimit = useCallback(async (locationId, productId, maxQty) => {
+    const value = maxQty === '' || maxQty == null ? null : Number(maxQty)
+    if (supabaseReady) {
+      const existing = locationProducts.find((lp) => lp.location_id === locationId && lp.product_id === productId)
+      await supabase.from('location_products').upsert(
+        { id: existing?.id, location_id: locationId, product_id: productId, price_override: existing?.price_override ?? null, max_qty: value },
+        { onConflict: 'location_id,product_id' }
+      )
+      await reload()
+    } else {
+      setLocationProducts((prev) => {
+        const idx = prev.findIndex((lp) => lp.location_id === locationId && lp.product_id === productId)
+        if (idx >= 0) {
+          const next = [...prev]
+          next[idx] = { ...next[idx], max_qty: value }
+          return next
+        }
+        return [...prev, { id: localId(), location_id: locationId, product_id: productId, price_override: null, max_qty: value }]
+      })
+    }
+  }, [reload, locationProducts])
+
+  // --- Остатки (stock) --------------------------------------------------
+  const setStock = useCallback(async (locationId, productId, quantity) => {
+    const value = Number(quantity) || 0
+    if (supabaseReady) {
+      await supabase.from('stock_levels').upsert(
+        { location_id: locationId, product_id: productId, quantity: value, updated_at: new Date().toISOString() },
+        { onConflict: 'location_id,product_id' }
+      )
+      setStockLevels((prev) => {
+        const idx = prev.findIndex((s) => s.location_id === locationId && s.product_id === productId)
+        const next = [...prev]
+        if (idx >= 0) next[idx] = { ...next[idx], quantity: value }
+        else next.push({ id: localId(), location_id: locationId, product_id: productId, quantity: value })
+        return next
+      })
+    } else {
+      setStockLevels((prev) => {
+        const idx = prev.findIndex((s) => s.location_id === locationId && s.product_id === productId)
+        if (idx >= 0) {
+          const next = [...prev]
+          next[idx] = { ...next[idx], quantity: value }
+          return next
+        }
+        return [...prev, { id: localId(), location_id: locationId, product_id: productId, quantity: value }]
+      })
+    }
+  }, [])
+
+  // --- Ревизия (inventory reconciliation) --------------------------------
+  const loadRevisions = useCallback(async (locationId, source = 'main') => {
+    if (!supabaseReady || !locationId) return []
+    const { data } = await supabase
+      .from('revisions')
+      .select('*, revision_items(diff)')
+      .eq('location_id', locationId)
+      .eq('source', source)
+      .order('created_at', { ascending: false })
+      .limit(20)
+    return (data || []).map((r) => ({
+      ...r,
+      items_count: r.revision_items?.length || 0,
+      total_diff: (r.revision_items || []).reduce((s, it) => s + (Number(it.diff) || 0), 0),
+    }))
+  }, [])
+
+  const loadRevisionItems = useCallback(async (revisionId) => {
+    if (!supabaseReady || !revisionId) return []
+    const { data } = await supabase.from('revision_items').select('*').eq('revision_id', revisionId).order('sort_order')
+    return data || []
+  }, [])
+
+  // Saves a revision (audit) and writes its actual-counted quantities back
+  // into stock_levels, so the new counted amount becomes the "учётный"
+  // (expected) baseline for next time.
+  const saveRevision = useCallback(async (locationId, locationName, source, rows, note) => {
+    const itemRows = rows.map((r, i) => ({
+      product_id: r.product_id,
+      product_name: r.product_name,
+      unit: r.unit,
+      expected_qty: r.expected_qty,
+      actual_qty: r.actual_qty,
+      diff: Number((r.actual_qty - r.expected_qty).toFixed(2)),
+      sort_order: i,
+    }))
+    if (supabaseReady) {
+      const { data: rev } = await supabase
+        .from('revisions')
+        .insert({ location_id: locationId, location_name: locationName, source, note: note || null })
+        .select()
+        .single()
+      if (rev) {
+        await supabase.from('revision_items').insert(itemRows.map((r) => ({ ...r, revision_id: rev.id })))
+        await supabase.from('stock_levels').upsert(
+          rows.map((r) => ({ location_id: locationId, product_id: r.product_id, quantity: r.actual_qty, updated_at: new Date().toISOString() })),
+          { onConflict: 'location_id,product_id' }
+        )
+      }
+      await reload()
+    } else {
+      setStockLevels((prev) => {
+        const next = [...prev]
+        for (const r of rows) {
+          const idx = next.findIndex((s) => s.location_id === locationId && s.product_id === r.product_id)
+          if (idx >= 0) next[idx] = { ...next[idx], quantity: r.actual_qty }
+          else next.push({ id: localId(), location_id: locationId, product_id: r.product_id, quantity: r.actual_qty })
+        }
+        return next
+      })
+    }
+  }, [reload])
+
   return {
-    locations, suppliers, products, locationProducts, settings, loading, reload, setSettings, loadLastOrder, loadFrequentProducts,
+    locations, suppliers, products, locationProducts, stockLevels, settings, loading, reload, setSettings, loadLastOrder, loadFrequentProducts,
     addLocation, updateLocation, removeLocation,
     addSupplier, updateSupplier, removeSupplier,
     addProduct, addProductsBulk, updateProduct, removeProduct,
-    saveSettings,
+    saveSettings, setLocationProductLimit,
+    setStock, loadRevisions, loadRevisionItems, saveRevision,
   }
 }
 
@@ -218,6 +340,15 @@ function IconSun() {
 function IconMoon() {
   return <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M20.5 14.5A8.5 8.5 0 1 1 9.5 3.5a7 7 0 0 0 11 11z" /></svg>
 }
+function IconLock() {
+  return <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><rect x="4.5" y="10.5" width="15" height="10" rx="2" /><path d="M8 10.5V7a4 4 0 0 1 8 0v3.5" /></svg>
+}
+function IconClipboard() {
+  return <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round"><rect x="5" y="4.5" width="14" height="16.5" rx="2" /><path d="M9 3.5h6a1 1 0 0 1 1 1v1.5H8V4.5a1 1 0 0 1 1-1z" /><path d="M8.5 11.5h7M8.5 15.5h7" /></svg>
+}
+function IconScale() {
+  return <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round"><path d="M12 3v18M6 7h12M4 7l2.5 5.5a2.6 2.6 0 0 0 5 0L14 7M9 7l2.5 5.5a2.6 2.6 0 0 0 5 0L19 7" /></svg>
+}
 
 // Small emoji icon per category, matched by keyword — purely decorative,
 // helps people scan the list visually instead of reading every label.
@@ -255,6 +386,33 @@ function buildSupplierWaMessage(locationName, items) {
   return `Здравствуйте! Заявка на закуп${locationName ? ` (${locationName})` : ''}:\n\n${lines.join('\n')}\n\nИтого: ${money(total)} ₸`
 }
 
+// Tries to hand the PDF file straight to WhatsApp via the OS share sheet
+// (works on phones — Chrome/Safari — where WhatsApp is installed: user
+// picks WhatsApp, the file is already attached, they just pick a contact
+// and hit send). Browsers don't allow a website to attach a file to
+// WhatsApp and press "send" with zero taps — that control belongs to the
+// OS/WhatsApp, not to any website — so when native sharing isn't available
+// (mostly desktop) this falls back to downloading the PDF and opening
+// WhatsApp with the order text ready, so only the file needs attaching by hand.
+async function sharePdfToWhatsApp(file, text, waDigits) {
+  if (typeof navigator !== 'undefined' && navigator.canShare && navigator.canShare({ files: [file] })) {
+    try {
+      await navigator.share({ files: [file], title: file.name, text })
+      return 'shared'
+    } catch (err) {
+      if (err && err.name === 'AbortError') return 'cancelled'
+      // fall through to download+link fallback below
+    }
+  }
+  const url = URL.createObjectURL(file)
+  const a = document.createElement('a')
+  a.href = url; a.download = file.name; a.click()
+  URL.revokeObjectURL(url)
+  const waUrl = `https://wa.me/${waDigits || ''}?text=${encodeURIComponent(text)}`
+  window.open(waUrl, '_blank', 'noopener')
+  return 'downloaded'
+}
+
 function Stepper({ qty, onChange, size = 'md' }) {
   return (
     <div className={`stepper stepper-${size}`}>
@@ -282,6 +440,15 @@ export default function App() {
   const { locations, suppliers, products, locationProducts, settings, loading } = store
 
   const [view, setView] = useState('order')
+  // Which точка's "Кухня" is unlocked right now — set by matching a PIN to
+  // a location, not by the user picking from a list. Kept in sessionStorage
+  // so a page refresh doesn't kick the point out mid-shift, but a browser
+  // restart / new tab requires the PIN again.
+  const [kitchenLocationId, setKitchenLocationId] = useState(() => {
+    if (typeof window === 'undefined') return ''
+    return window.sessionStorage.getItem('zakup-kitchen-location-id') || ''
+  })
+  const [pinModalOpen, setPinModalOpen] = useState(false)
   const [locationId, setLocationId] = useState('')
   const [query, setQuery] = useState('')
   const [categoryFilter, setCategoryFilter] = useState('')
@@ -358,10 +525,12 @@ export default function App() {
     const hasScope = scoped.length > 0
     const scopedIds = new Set(scoped.map((lp) => lp.product_id))
     const overrideById = Object.fromEntries(scoped.map((lp) => [lp.product_id, lp.price_override]))
+    const maxQtyById = Object.fromEntries(scoped.map((lp) => [lp.product_id, lp.max_qty]))
     const list = products.filter((p) => (hasScope ? scopedIds.has(p.id) : true))
     return list.map((p) => ({
       ...p,
       effective_price: overrideById[p.id] != null ? overrideById[p.id] : p.price,
+      max_qty: maxQtyById[p.id] != null ? maxQtyById[p.id] : null,
     }))
   }, [products, locationProducts, locationId])
 
@@ -440,6 +609,12 @@ export default function App() {
 
   function setQty(product, qty) {
     const sup = supplierById[product.supplier_id]
+    let clamped = qty
+    if (product.max_qty != null && clamped > product.max_qty) {
+      clamped = product.max_qty
+      showToast(`Лимит по этой точке: ${product.max_qty} ${product.unit}`, 'info')
+    }
+    qty = clamped
     const isNewAddition = qty > 0 && !cartById[product.id]
     setCarts((prev) => {
       const list = prev[locationId] ? [...prev[locationId]] : []
@@ -477,6 +652,11 @@ export default function App() {
   }
 
   function setCartItemQty(product_id, qty) {
+    const limit = locationScopedProducts.find((p) => p.id === product_id)?.max_qty
+    if (limit != null && qty > limit) {
+      qty = limit
+      showToast(`Лимит по этой точке: ${limit}`, 'info')
+    }
     setCarts((prev) => {
       const list = prev[locationId] ? [...prev[locationId]] : []
       const idx = list.findIndex((it) => it.product_id === product_id)
@@ -534,6 +714,33 @@ export default function App() {
     window.open(url, '_blank', 'noopener')
   }
 
+  // Same as above but generates the PDF report first and hands it to
+  // WhatsApp via the share sheet (see sharePdfToWhatsApp for the fallback
+  // when native sharing isn't available).
+  async function sendSupplierPdfWhatsApp(items) {
+    const { buildFilename, exportPDF } = await import('./lib/report')
+    const filename = buildFilename(settings.report_filename_template, { locationName: currentLocation?.name })
+    const file = exportPDF({ items, locationName: currentLocation?.name, filename, companyName: settings.company_name, output: 'file' })
+    const digits = phoneToWaDigits(items[0]?.supplier_contact)
+    const text = buildSupplierWaMessage(currentLocation?.name, items)
+    const result = await sharePdfToWhatsApp(file, text, digits)
+    if (result === 'shared') showToast('Готово — выберите WhatsApp и отправьте', 'success')
+    else if (result === 'downloaded') showToast('PDF скачан, WhatsApp открыт с текстом — приложите файл к сообщению', 'info')
+  }
+
+  // Whole-order PDF → WhatsApp: no single supplier number, so on desktop
+  // fallback it opens WhatsApp's contact picker instead of a fixed number.
+  async function sendWholeOrderPdfWhatsApp() {
+    if (!cart.length) return
+    const { buildFilename, exportPDF } = await import('./lib/report')
+    const filename = buildFilename(settings.report_filename_template, { locationName: currentLocation?.name })
+    const file = exportPDF({ items: cart, locationName: currentLocation?.name, filename, companyName: settings.company_name, output: 'file' })
+    const text = `Заявка на закуп${currentLocation?.name ? ` (${currentLocation.name})` : ''} во вложении`
+    const result = await sharePdfToWhatsApp(file, text, '')
+    if (result === 'shared') showToast('Готово — выберите WhatsApp и отправьте', 'success')
+    else if (result === 'downloaded') showToast('PDF скачан, WhatsApp открыт — выберите чат и приложите файл', 'info')
+  }
+
   function toggleTheme() {
     setTheme((t) => (t === 'dark' ? 'light' : 'dark'))
   }
@@ -543,7 +750,7 @@ export default function App() {
     if (supabaseReady) {
       const { data: order } = await supabase
         .from('orders')
-        .insert({ location_id: locationId, status: 'finished', finished_at: new Date().toISOString() })
+        .insert({ location_id: locationId, status: 'finished', source: 'main', finished_at: new Date().toISOString() })
         .select()
         .single()
       if (order) {
@@ -554,6 +761,43 @@ export default function App() {
     await handleExport('excel')
     showToast('Закуп завершён и сохранён', 'success')
     clearCart()
+  }
+
+  function openKitchen() {
+    if (kitchenLocationId && locations.some((l) => l.id === kitchenLocationId)) { setView('kitchen'); return }
+    setPinModalOpen(true)
+  }
+  function handleKitchenUnlocked(location) {
+    setKitchenLocationId(location.id)
+    try { window.sessionStorage.setItem('zakup-kitchen-location-id', location.id) } catch (e) { /* ignore */ }
+    setPinModalOpen(false)
+    setView('kitchen')
+  }
+  function lockKitchen() {
+    setKitchenLocationId('')
+    try { window.sessionStorage.removeItem('zakup-kitchen-location-id') } catch (e) { /* ignore */ }
+    setView('order')
+  }
+
+  const kitchenLocation = locations.find((l) => l.id === kitchenLocationId)
+
+  // Точку могли удалить, пока человек был внутри «Кухни» — не показываем
+  // чужие данные по инерции, а сразу выкидываем его к вводу PIN заново.
+  useEffect(() => {
+    if (view === 'kitchen' && !loading && kitchenLocationId && !kitchenLocation) lockKitchen()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, loading, kitchenLocationId, kitchenLocation])
+
+  if (view === 'kitchen' && kitchenLocation) {
+    return (
+      <KitchenApp
+        store={store}
+        theme={theme}
+        toggleTheme={toggleTheme}
+        location={kitchenLocation}
+        onExit={lockKitchen}
+      />
+    )
   }
 
   return (
@@ -567,7 +811,10 @@ export default function App() {
         </select>
         <nav>
           <button className={`tab-btn ${view === 'order' ? 'active' : ''}`} onClick={() => setView('order')}>Заказ</button>
+          <button className={`tab-btn ${view === 'stock' ? 'active' : ''}`} onClick={() => setView('stock')}>Остатки</button>
+          <button className={`tab-btn ${view === 'revision' ? 'active' : ''}`} onClick={() => setView('revision')}>Ревизия</button>
           <button className={`tab-btn ${view === 'settings' ? 'active' : ''}`} onClick={() => setView('settings')}>Настройки</button>
+          <button type="button" className="tab-btn kitchen-tab" onClick={openKitchen}><IconLock /> Кухня</button>
         </nav>
         <button
           type="button"
@@ -758,16 +1005,26 @@ export default function App() {
                 <div className="ticket-group" key={supplierName}>
                   <div className="ticket-group-head">
                     <div className="supplier-name">{supplierName}</div>
-                    {items[0]?.supplier_contact && (
+                    <div className="ticket-group-actions">
+                      {items[0]?.supplier_contact && (
+                        <button
+                          type="button"
+                          className="wa-btn"
+                          onClick={() => sendSupplierWhatsApp(items)}
+                          title={`Отправить текстом заказ «${supplierName}» в WhatsApp`}
+                        >
+                          <IconWhatsApp /> Текст
+                        </button>
+                      )}
                       <button
                         type="button"
                         className="wa-btn"
-                        onClick={() => sendSupplierWhatsApp(items)}
-                        title={`Отправить заказ «${supplierName}» в WhatsApp`}
+                        onClick={() => sendSupplierPdfWhatsApp(items)}
+                        title={`Сформировать PDF по «${supplierName}» и отправить в WhatsApp`}
                       >
-                        <IconWhatsApp /> WhatsApp
+                        <IconWhatsApp /> PDF
                       </button>
-                    )}
+                    </div>
                   </div>
                   {items.map((it) => (
                     <div className="ticket-item" key={it.product_id}>
@@ -789,15 +1046,50 @@ export default function App() {
                 <button className="btn" disabled={!cart.length} onClick={() => handleExport('excel')}>Excel</button>
               </div>
               <div className="ticket-actions" style={{ marginTop: 8 }}>
+                <button className="btn" disabled={!cart.length} onClick={sendWholeOrderPdfWhatsApp}>
+                  <IconWhatsApp /> PDF в WhatsApp
+                </button>
+              </div>
+              <div className="ticket-actions" style={{ marginTop: 8 }}>
                 <button className="btn" disabled={!cart.length} onClick={clearCart}>Очистить</button>
                 <button className="btn primary" disabled={!cart.length} onClick={finishOrder}>Завершить закуп</button>
               </div>
             </div>
           </div>
         </div>
+      ) : view === 'stock' ? (
+        <div className="main" style={{ gridTemplateColumns: '1fr' }}>
+          <div className="panel">
+            <StockTab
+              store={store}
+              locations={locations}
+              products={products}
+              title="Остатки"
+            />
+          </div>
+        </div>
+      ) : view === 'revision' ? (
+        <div className="main" style={{ gridTemplateColumns: '1fr' }}>
+          <div className="panel">
+            <RevisionTab
+              store={store}
+              locations={locations}
+              products={products}
+              source="main"
+              title="Ревизия"
+            />
+          </div>
+        </div>
       ) : (
         <Settings store={store} />
       )}
+
+      <PinModal
+        open={pinModalOpen}
+        locations={locations}
+        onCancel={() => setPinModalOpen(false)}
+        onSuccess={handleKitchenUnlocked}
+      />
 
       {view === 'order' && cart.length > 0 && (
         <button
@@ -853,6 +1145,74 @@ function ConfirmDialog({ open, title, message, confirmLabel = 'Удалить', 
   )
 }
 
+// 4-digit PIN pad to unlock the isolated "Кухня" tab. Each точка (location)
+// has its OWN PIN (Настройки → Точки), so this matches the entered code
+// against every location's pin and unlocks only the matching one — one
+// точка can never see or switch into another точка's остатки/ревизия/заказ.
+function PinModal({ open, locations, onCancel, onSuccess }) {
+  const [entered, setEntered] = useState('')
+  const [shake, setShake] = useState(false)
+
+  const pinnedLocations = useMemo(() => (locations || []).filter((l) => (l.pin || '').trim()), [locations])
+
+  useEffect(() => { if (open) setEntered('') }, [open])
+
+  useEffect(() => {
+    if (entered.length < 4) return
+    const match = pinnedLocations.find((l) => l.pin === entered)
+    if (match) {
+      onSuccess(match)
+    } else {
+      setShake(true)
+      setTimeout(() => { setShake(false); setEntered('') }, 420)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [entered])
+
+  if (!open) return null
+  const hasAnyPin = pinnedLocations.length > 0
+
+  return (
+    <div className="modal-backdrop" onClick={onCancel}>
+      <div className="modal-card pin-card" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
+        <div className="modal-icon"><IconLock /></div>
+        <div className="modal-title">Вкладка «Кухня»</div>
+        {!hasAnyPin ? (
+          <>
+            <div className="modal-message">Ни для одной точки не задан PIN. Откройте «Настройки → Точки» и укажите 4-значный код для каждой точки.</div>
+            <div className="modal-actions"><button className="btn" onClick={onCancel}>Понятно</button></div>
+          </>
+        ) : (
+          <>
+            <div className="modal-message">Введите 4-значный PIN своей точки</div>
+            <div className={`pin-dots ${shake ? 'shake' : ''}`}>
+              {[0, 1, 2, 3].map((i) => <span key={i} className={`pin-dot ${entered.length > i ? 'filled' : ''}`} />)}
+            </div>
+            <div className="pin-pad">
+              {['1', '2', '3', '4', '5', '6', '7', '8', '9', '', '0', '⌫'].map((k, i) => (
+                k === '' ? <span key={i} /> : (
+                  <button
+                    type="button"
+                    key={i}
+                    className="pin-key"
+                    onClick={() => {
+                      if (k === '⌫') setEntered((s) => s.slice(0, -1))
+                      else if (entered.length < 4) setEntered((s) => s + k)
+                    }}
+                  >
+                    {k}
+                  </button>
+                )
+              ))}
+            </div>
+            <div className="modal-actions"><button className="btn" onClick={onCancel}>Отмена</button></div>
+          </>
+        )}
+      </div>
+    </div>
+  )
+}
+
 function IconLocation() {
   return <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 22s7-7.4 7-12.5A7 7 0 0 0 5 9.5C5 14.6 12 22 12 22z" /><circle cx="12" cy="9.5" r="2.4" /></svg>
 }
@@ -869,6 +1229,7 @@ function Settings({ store }) {
     ['locations', 'Точки', IconLocation],
     ['suppliers', 'Поставщики', IconTruck],
     ['products', 'Товары', IconBox],
+    ['limits', 'Лимиты', IconScale],
     ['report', 'Отчёт', IconFile],
   ]
   return (
@@ -884,16 +1245,92 @@ function Settings({ store }) {
         {tab === 'locations' && <LocationsTab store={store} />}
         {tab === 'suppliers' && <SuppliersTab store={store} />}
         {tab === 'products' && <ProductsTab store={store} />}
+        {tab === 'limits' && <LimitsTab store={store} />}
         {tab === 'report' && <ReportTab store={store} />}
       </div>
     </div>
   )
 }
 
+// Per-location max quantity for a product in one закуп — "лимит товаров на
+// точку". Reuses location_products (same table as the price override).
+function LimitsTab({ store }) {
+  const { locations, products, suppliers, locationProducts, setLocationProductLimit } = store
+  const [locationId, setLocationId] = useState(locations[0]?.id || '')
+  const [q, setQ] = useState('')
+  const supplierById = useMemo(() => Object.fromEntries(suppliers.map((s) => [s.id, s])), [suppliers])
+
+  useEffect(() => {
+    if (!locationId && locations.length) setLocationId(locations[0].id)
+  }, [locations, locationId])
+
+  const limitByProduct = useMemo(() => {
+    const m = new Map()
+    for (const lp of locationProducts) if (lp.location_id === locationId) m.set(lp.product_id, lp.max_qty)
+    return m
+  }, [locationProducts, locationId])
+
+  const filtered = useMemo(() => {
+    if (!q.trim()) return products
+    const s = q.trim().toLowerCase()
+    return products.filter((p) => p.name.toLowerCase().includes(s) || (supplierById[p.supplier_id]?.name || '').toLowerCase().includes(s))
+  }, [products, q, supplierById])
+
+  if (!locations.length) return <div className="empty-state">Сначала добавьте хотя бы одну точку на вкладке «Точки».</div>
+
+  return (
+    <div>
+      <div className="hint-explainer">
+        <IconScale /> Лимит — максимальное количество товара, которое можно добавить в один закуп для выбранной точки.
+        Пусто — лимита нет. Работает и в обычном заказе, и в «Кухне».
+      </div>
+      <div className="row-form" style={{ marginBottom: 14 }}>
+        <select value={locationId} onChange={(e) => setLocationId(e.target.value)}>
+          {locations.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
+        </select>
+        <div className="settings-search" style={{ flex: 1 }}>
+          <IconSearch />
+          <input placeholder="Поиск товара или поставщика..." value={q} onChange={(e) => setQ(e.target.value)} />
+        </div>
+      </div>
+      <div className="table-scroll">
+        <table className="data-table">
+          <thead><tr><th>Товар</th><th>Поставщик</th><th style={{ width: 140 }}>Лимит на точку</th></tr></thead>
+          <tbody>
+            {filtered.map((p) => (
+              <tr key={p.id}>
+                <td>{p.name}</td>
+                <td>{supplierById[p.supplier_id]?.name || '—'}</td>
+                <td>
+                  <input
+                    type="number"
+                    inputMode="decimal"
+                    min="0"
+                    placeholder="без лимита"
+                    defaultValue={limitByProduct.get(p.id) ?? ''}
+                    onBlur={(e) => setLocationProductLimit(locationId, p.id, e.target.value)}
+                    style={{ width: 110 }}
+                  />
+                </td>
+              </tr>
+            ))}
+            {filtered.length === 0 && <tr><td colSpan={3} style={{ color: 'var(--ink-soft)', textAlign: 'center', padding: 20 }}>Ничего не найдено</td></tr>}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
+// Точки + их персональный PIN для входа в «Кухню». Каждая точка видит и
+// редактирует PIN только своей строки — вводить его нужно на телефоне
+// в модалке «Кухня», после чего человек попадает сразу в свою точку без
+// возможности заглянуть в чужую.
 function LocationsTab({ store }) {
   const { locations, addLocation, updateLocation, removeLocation } = store
   const [name, setName] = useState('')
   const [confirmTarget, setConfirmTarget] = useState(null)
+  const [savedId, setSavedId] = useState(null)
 
   async function add() {
     if (!name.trim()) return
@@ -907,24 +1344,64 @@ function LocationsTab({ store }) {
   async function rename(id, value) {
     await updateLocation(id, 'name', value)
   }
+  async function setPin(id, rawValue) {
+    const digits = rawValue.replace(/\D/g, '').slice(0, 4)
+    await updateLocation(id, 'pin', digits || null)
+    setSavedId(id)
+    setTimeout(() => setSavedId((cur) => (cur === id ? null : cur)), 1400)
+  }
+
+  // Two точки with the same PIN would be ambiguous — the first match wins,
+  // which silently locks the second one out. Flag duplicates up front.
+  const pinCounts = useMemo(() => {
+    const m = new Map()
+    for (const l of locations) {
+      const p = (l.pin || '').trim()
+      if (p) m.set(p, (m.get(p) || 0) + 1)
+    }
+    return m
+  }, [locations])
 
   return (
     <div>
+      <div className="hint-explainer">
+        <IconLock /> У каждой точки свой 4-значный PIN — по нему открывается вкладка «Кухня» на
+        телефоне. Введя PIN, человек сразу попадает в свою точку (свой закуп, свои остатки, своя
+        ревизия) и не может переключиться на другую — так одна точка не видит остатки другой.
+        Пустой PIN — вход в «Кухню» для этой точки закрыт.
+      </div>
       <div className="row-form">
         <input placeholder="Название точки (напр. AFRO)" value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && add()} autoFocus />
         <button className="btn primary" onClick={add}>Добавить точку</button>
       </div>
       <div className="table-scroll">
         <table className="data-table">
-          <thead><tr><th>Название</th><th></th></tr></thead>
+          <thead><tr><th>Название</th><th style={{ width: 170 }}>PIN «Кухни»</th><th></th></tr></thead>
           <tbody>
-            {locations.map((l) => (
-              <tr key={l.id}>
-                <td><input defaultValue={l.name} onBlur={(e) => e.target.value !== l.name && rename(l.id, e.target.value)} style={{ border: 'none', background: 'transparent', font: 'inherit', width: '100%' }} /></td>
-                <td><button className="del-link" onClick={() => setConfirmTarget(l)}>удалить</button></td>
-              </tr>
-            ))}
-            {locations.length === 0 && <tr><td colSpan={2} style={{ color: 'var(--ink-soft)', textAlign: 'center', padding: 20 }}>Точек пока нет — добавьте первую выше</td></tr>}
+            {locations.map((l) => {
+              const pin = l.pin || ''
+              const isDuplicate = pin && (pinCounts.get(pin) || 0) > 1
+              return (
+                <tr key={l.id}>
+                  <td><input defaultValue={l.name} onBlur={(e) => e.target.value !== l.name && rename(l.id, e.target.value)} style={{ border: 'none', background: 'transparent', font: 'inherit', width: '100%' }} /></td>
+                  <td>
+                    <div className="stock-cell">
+                      <input
+                        defaultValue={pin}
+                        onBlur={(e) => e.target.value.replace(/\D/g, '').slice(0, 4) !== pin && setPin(l.id, e.target.value)}
+                        placeholder="напр. 4821"
+                        inputMode="numeric"
+                        style={{ width: 90, letterSpacing: 2, textAlign: 'center' }}
+                      />
+                      {savedId === l.id && <IconCheck />}
+                    </div>
+                    {isDuplicate && <div className="hint" style={{ marginTop: 4 }}>Такой PIN уже занят другой точкой</div>}
+                  </td>
+                  <td><button className="del-link" onClick={() => setConfirmTarget(l)}>удалить</button></td>
+                </tr>
+              )
+            })}
+            {locations.length === 0 && <tr><td colSpan={3} style={{ color: 'var(--ink-soft)', textAlign: 'center', padding: 20 }}>Точек пока нет — добавьте первую выше</td></tr>}
           </tbody>
         </table>
       </div>
@@ -1009,7 +1486,7 @@ function SuppliersTab({ store }) {
 }
 
 const COMMON_UNITS = ['шт', 'кг', 'л', 'упк', 'уп', 'пачка', 'г', 'мл', 'ящик']
-const emptyProductForm = { name: '', supplier_id: '', category: '', unit: 'шт', price: '', payment_note: '', hint: '' }
+const emptyProductForm = { name: '', supplier_id: '', category: '', unit: 'шт', price: '', payment_note: '', hint: '', is_kitchen: false }
 
 function ProductsTab({ store }) {
   const { products, suppliers, addProduct, addProductsBulk, updateProduct, removeProduct } = store
@@ -1066,6 +1543,7 @@ function ProductsTab({ store }) {
       price: p.price ?? '',
       payment_note: p.payment_note || '',
       hint: p.hint || '',
+      is_kitchen: !!p.is_kitchen,
     })
     nameInputRef.current?.focus()
     nameInputRef.current?.select()
@@ -1169,6 +1647,10 @@ function ProductsTab({ store }) {
         <input placeholder="Цена, тг" type="number" inputMode="decimal" value={form.price} onChange={(e) => setForm((f) => ({ ...f, price: e.target.value }))} onKeyDown={onKeyDown} />
         <input placeholder="Примечание к оплате" value={form.payment_note} onChange={(e) => setForm((f) => ({ ...f, payment_note: e.target.value }))} onKeyDown={onKeyDown} />
         <input placeholder="Подсказка (напр. «нужна крышка»)" value={form.hint} onChange={(e) => setForm((f) => ({ ...f, hint: e.target.value }))} onKeyDown={onKeyDown} />
+        <label className="kitchen-check">
+          <input type="checkbox" checked={form.is_kitchen} onChange={(e) => setForm((f) => ({ ...f, is_kitchen: e.target.checked }))} />
+          Кухня
+        </label>
         <button className="btn primary" onClick={add}>Добавить товар</button>
       </div>
       <datalist id="categories-list">{categories.map((c) => <option value={c} key={c} />)}</datalist>
@@ -1184,6 +1666,10 @@ function ProductsTab({ store }) {
         <IconLink /> Колонка «Подсказка» — необязательная короткая заметка под товаром в списке заказа. Полезна для парных товаров:
         например у ведра укажите «нужна крышка», а у крышки — «подходит к ведру 0,85л».
       </div>
+      <div className="hint-explainer">
+        <IconLock /> Галочка «Кухня» — товар попадёт в изолированную вкладку «Кухня» (свой закуп,
+        свои остатки, своя ревизия, доступ по PIN). Настройте PIN на вкладке «Кухня» в настройках.
+      </div>
 
       {products.length > 6 && (
         <div className="settings-search">
@@ -1195,7 +1681,7 @@ function ProductsTab({ store }) {
 
       <div className="table-scroll">
         <table className="data-table">
-          <thead><tr><th>Товар</th><th>Поставщик</th><th>Категория</th><th>ед</th><th>тг</th><th>Примечание</th><th>Подсказка</th><th></th></tr></thead>
+          <thead><tr><th>Товар</th><th>Поставщик</th><th>Категория</th><th>ед</th><th>тг</th><th>Примечание</th><th>Подсказка</th><th>Кухня</th><th></th></tr></thead>
           <tbody>
             {filtered.map((p) => (
               <tr key={p.id}>
@@ -1211,14 +1697,17 @@ function ProductsTab({ store }) {
                 <td><input defaultValue={p.price} type="number" onBlur={(e) => Number(e.target.value) !== p.price && update(p.id, 'price', Number(e.target.value))} style={{ border: 'none', background: 'transparent', font: 'inherit', width: 64 }} /></td>
                 <td><input defaultValue={p.payment_note} onBlur={(e) => e.target.value !== p.payment_note && update(p.id, 'payment_note', e.target.value)} style={{ border: 'none', background: 'transparent', font: 'inherit', width: '100%' }} /></td>
                 <td><input defaultValue={p.hint} placeholder="—" onBlur={(e) => e.target.value !== p.hint && update(p.id, 'hint', e.target.value)} style={{ border: 'none', background: 'transparent', font: 'inherit', width: '100%' }} /></td>
+                <td style={{ textAlign: 'center' }}>
+                  <input type="checkbox" defaultChecked={!!p.is_kitchen} onChange={(e) => update(p.id, 'is_kitchen', e.target.checked)} />
+                </td>
                 <td style={{ whiteSpace: 'nowrap' }}>
                   <button className="dup-link" onClick={() => duplicateToForm(p)} title="Заполнить форму данными этого товара, чтобы быстро добавить похожий">дублировать</button>
                   <button className="del-link" onClick={() => setConfirmTarget(p)}>удалить</button>
                 </td>
               </tr>
             ))}
-            {products.length === 0 && <tr><td colSpan={8} style={{ color: 'var(--ink-soft)', textAlign: 'center', padding: 20 }}>Товаров пока нет — добавьте вручную или импортируйте CSV</td></tr>}
-            {products.length > 0 && filtered.length === 0 && <tr><td colSpan={8} style={{ color: 'var(--ink-soft)', textAlign: 'center', padding: 20 }}>Ничего не найдено по запросу «{q}»</td></tr>}
+            {products.length === 0 && <tr><td colSpan={9} style={{ color: 'var(--ink-soft)', textAlign: 'center', padding: 20 }}>Товаров пока нет — добавьте вручную или импортируйте CSV</td></tr>}
+            {products.length > 0 && filtered.length === 0 && <tr><td colSpan={9} style={{ color: 'var(--ink-soft)', textAlign: 'center', padding: 20 }}>Ничего не найдено по запросу «{q}»</td></tr>}
           </tbody>
         </table>
       </div>
@@ -1268,6 +1757,713 @@ function ReportTab({ store }) {
         <button className="btn primary" onClick={save}>Сохранить</button>
         {saved && <span className="save-confirm"><IconCheck /> Сохранено</span>}
       </div>
+    </div>
+  )
+}
+
+// --- Остатки -----------------------------------------------------------
+// Shared between the main app (all products) and the isolated Kitchen tab
+// (only is_kitchen products) via the `products` prop the caller passes in.
+// --- Остатки ---------------------------------------------------------------
+// Карточный список с категориями (как на вкладке «Заказ»), плюс/минус
+// степпером и авто-сохранением — вместо голой таблицы с мелкими полями
+// ввода, которую неудобно листать и заполнять с телефона.
+function StockTab({ store, locations, products, title }) {
+  const { stockLevels, setStock } = store
+  const [locationId, setLocationId] = useState(locations[0]?.id || '')
+  const [q, setQ] = useState('')
+  const [categoryFilter, setCategoryFilter] = useState('')
+  const [onlyStocked, setOnlyStocked] = useState(false)
+  const [collapsed, setCollapsed] = useState({})
+  const [savedIds, setSavedIds] = useState({})
+  // Optimistic local values so +/- feels instant — the real save to
+  // Supabase is debounced (see commit()) and can lag a network round-trip
+  // behind, but the Stepper shouldn't wait for that to reflect the tap.
+  const [pending, setPending] = useState({})
+  const saveTimers = useRef({})
+
+  useEffect(() => {
+    if (!locationId && locations.length) setLocationId(locations[0].id)
+  }, [locations, locationId])
+
+  useEffect(() => { setPending({}); setSavedIds({}) }, [locationId])
+
+  useEffect(() => () => { Object.values(saveTimers.current).forEach(clearTimeout) }, [])
+
+  const stockByProduct = useMemo(() => {
+    const m = new Map()
+    for (const s of stockLevels) if (s.location_id === locationId) m.set(s.product_id, Number(s.quantity) || 0)
+    return m
+  }, [stockLevels, locationId])
+
+  function displayQty(productId) {
+    return pending[productId] !== undefined ? pending[productId] : (stockByProduct.get(productId) || 0)
+  }
+
+  const filteredBase = useMemo(() => {
+    if (!q.trim()) return products
+    const s = q.trim().toLowerCase()
+    return products.filter((p) => p.name.toLowerCase().includes(s) || (p.category || '').toLowerCase().includes(s))
+  }, [products, q])
+
+  const filtered = useMemo(() => {
+    if (!onlyStocked) return filteredBase
+    return filteredBase.filter((p) => displayQty(p.id) > 0)
+  }, [filteredBase, onlyStocked, stockByProduct, pending])
+
+  const categoryOptions = useMemo(() => {
+    const counts = new Map()
+    for (const p of filtered) {
+      const cat = p.category?.trim() || 'Без категории'
+      counts.set(cat, (counts.get(cat) || 0) + 1)
+    }
+    return [...counts.entries()].sort((a, b) => b[1] - a[1])
+  }, [filtered])
+
+  const grouped = useMemo(() => {
+    const byCat = new Map()
+    for (const p of filtered) {
+      const cat = p.category?.trim() || 'Без категории'
+      if (categoryFilter && cat !== categoryFilter) continue
+      if (!byCat.has(cat)) byCat.set(cat, [])
+      byCat.get(cat).push(p)
+    }
+    return [...byCat.entries()]
+  }, [filtered, categoryFilter])
+
+  function toggleCat(cat) { setCollapsed((prev) => ({ ...prev, [cat]: !prev[cat] })) }
+  const isFiltering = Boolean(q.trim() || categoryFilter || onlyStocked)
+  const allCollapsed = grouped.length > 0 && grouped.every(([cat]) => collapsed[cat])
+  function toggleAllCollapsed() {
+    const next = {}
+    if (!allCollapsed) for (const [cat] of grouped) next[cat] = true
+    setCollapsed(next)
+  }
+
+  // Local value updates instantly (see displayQty); the write to Supabase
+  // is debounced so holding +/- doesn't fire a save per tap — one save
+  // ~350ms after the person stops adjusting a given item.
+  function commit(productId, value) {
+    setPending((prev) => ({ ...prev, [productId]: value }))
+    clearTimeout(saveTimers.current[productId])
+    const savedLocationId = locationId
+    saveTimers.current[productId] = setTimeout(async () => {
+      await setStock(savedLocationId, productId, value)
+      setSavedIds((prev) => ({ ...prev, [productId]: true }))
+      setTimeout(() => setSavedIds((prev) => (prev[productId] ? { ...prev, [productId]: false } : prev)), 1200)
+    }, 350)
+  }
+
+  if (!locations.length) return <div className="empty-state">Сначала добавьте хотя бы одну точку.</div>
+  if (!products.length) return <div className="empty-state">Нет товаров для отображения остатков.</div>
+
+  return (
+    <div>
+      <div className="panel-head-row">
+        <h2>{title || 'Остатки'}</h2>
+        <div className="panel-head-actions">
+          {grouped.length > 1 && (
+            <button className="btn ghost small" onClick={toggleAllCollapsed}>{allCollapsed ? 'Развернуть всё' : 'Свернуть всё'}</button>
+          )}
+        </div>
+      </div>
+      <div className="row-form" style={{ marginBottom: 10 }}>
+        {locations.length > 1 && (
+          <select value={locationId} onChange={(e) => setLocationId(e.target.value)}>
+            {locations.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
+          </select>
+        )}
+        <div className="settings-search" style={{ flex: 1 }}>
+          <IconSearch />
+          <input placeholder="Поиск товара..." value={q} onChange={(e) => setQ(e.target.value)} />
+          {q && <button className="search-clear" onClick={() => setQ('')} aria-label="Очистить поиск"><IconClose /></button>}
+        </div>
+      </div>
+      <div className="chip-row">
+        <button className={`chip ${!onlyStocked ? 'active' : ''}`} onClick={() => setOnlyStocked(false)}>Все товары</button>
+        <button className={`chip ${onlyStocked ? 'active' : ''}`} onClick={() => setOnlyStocked(true)}>Только с остатком</button>
+      </div>
+      {categoryOptions.length > 1 && (
+        <div className="chip-row">
+          <button className={`chip ${!categoryFilter ? 'active' : ''}`} onClick={() => setCategoryFilter('')}>
+            Все категории <span className="chip-count">{filtered.length}</span>
+          </button>
+          {categoryOptions.map(([cat, count]) => (
+            <button key={cat} className={`chip ${categoryFilter === cat ? 'active' : ''}`} onClick={() => setCategoryFilter(categoryFilter === cat ? '' : cat)}>
+              {cat} <span className="chip-count">{count}</span>
+            </button>
+          ))}
+        </div>
+      )}
+      <div className="product-list">
+        {grouped.length === 0 && (
+          <div className="empty-state"><span className="empty-icon"><IconSearch /></span>Ничего не найдено</div>
+        )}
+        {grouped.map(([cat, list]) => {
+          const isOpen = isFiltering || !collapsed[cat]
+          const filledCount = list.filter((p) => displayQty(p.id) > 0).length
+          return (
+            <div className="supplier-group" key={cat}>
+              <button type="button" className="supplier-head" onClick={() => toggleCat(cat)} aria-expanded={isOpen}>
+                <span aria-hidden="true">{categoryIcon(cat)}</span>
+                <span className="supplier-name">{cat}</span>
+                <span className="category-count">{list.length}</span>
+                {filledCount > 0 && <span className="category-badge">{filledCount} с остатком</span>}
+                <span className={`chevron ${isOpen ? 'open' : ''}`}><IconChevron /></span>
+              </button>
+              {isOpen && (
+                <div className="supplier-body">
+                  {list.map((p) => {
+                    const qty = displayQty(p.id)
+                    return (
+                      <div className={`product-row ${qty > 0 ? 'in-cart' : ''}`} key={p.id}>
+                        <div className="product-info">
+                          <div className="name">{p.name}</div>
+                          {p.hint && <div className="hint"><IconLink /> {p.hint}</div>}
+                        </div>
+                        <div className="price"><span className="unit">{p.unit}</span></div>
+                        <div className="stock-cell">
+                          <Stepper qty={qty} onChange={(v) => commit(p.id, v)} />
+                          {savedIds[p.id] && <IconCheck />}
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+// --- Ревизия -------------------------------------------------------------
+// Сверка фактического (посчитанного вручную) остатка с учётным (последним
+// сохранённым значением в Остатках). Тот же карточный список с категориями
+// и степпером, что и на «Остатках» — степпер по умолчанию показывает
+// учтённый остаток, а любое +/- или ручной ввод отмечает товар как
+// «посчитанный». Сохранение записывает разницу в историю и переносит
+// фактические значения в новый учётный остаток.
+function RevisionTab({ store, locations, products, source, title }) {
+  const { stockLevels, loadRevisions, saveRevision } = store
+  const [locationId, setLocationId] = useState(locations[0]?.id || '')
+  const [q, setQ] = useState('')
+  const [categoryFilter, setCategoryFilter] = useState('')
+  const [onlyTouched, setOnlyTouched] = useState(false)
+  const [collapsed, setCollapsed] = useState({})
+  const [actuals, setActuals] = useState({})
+  const [note, setNote] = useState('')
+  const [history, setHistory] = useState([])
+  const [busy, setBusy] = useState(false)
+  const [toast, setToast] = useState('')
+
+  useEffect(() => {
+    if (!locationId && locations.length) setLocationId(locations[0].id)
+  }, [locations, locationId])
+
+  useEffect(() => {
+    setActuals({})
+    setOnlyTouched(false)
+    if (locationId) loadRevisions(locationId, source).then(setHistory)
+  }, [locationId, source, loadRevisions])
+
+  const stockByProduct = useMemo(() => {
+    const m = new Map()
+    for (const s of stockLevels) if (s.location_id === locationId) m.set(s.product_id, Number(s.quantity) || 0)
+    return m
+  }, [stockLevels, locationId])
+
+  function hasActual(productId) {
+    const v = actuals[productId]
+    return v !== undefined && v !== ''
+  }
+  function expectedOf(productId) { return stockByProduct.get(productId) || 0 }
+  function displayQty(productId) {
+    return hasActual(productId) ? Number(actuals[productId]) || 0 : expectedOf(productId)
+  }
+  function diffOf(productId) {
+    return hasActual(productId) ? Number(actuals[productId]) - expectedOf(productId) : 0
+  }
+
+  const filteredBase = useMemo(() => {
+    if (!q.trim()) return products
+    const s = q.trim().toLowerCase()
+    return products.filter((p) => p.name.toLowerCase().includes(s) || (p.category || '').toLowerCase().includes(s))
+  }, [products, q])
+
+  const filtered = useMemo(() => {
+    if (!onlyTouched) return filteredBase
+    return filteredBase.filter((p) => hasActual(p.id))
+  }, [filteredBase, onlyTouched, actuals])
+
+  const categoryOptions = useMemo(() => {
+    const counts = new Map()
+    for (const p of filtered) {
+      const cat = p.category?.trim() || 'Без категории'
+      counts.set(cat, (counts.get(cat) || 0) + 1)
+    }
+    return [...counts.entries()].sort((a, b) => b[1] - a[1])
+  }, [filtered])
+
+  const grouped = useMemo(() => {
+    const byCat = new Map()
+    for (const p of filtered) {
+      const cat = p.category?.trim() || 'Без категории'
+      if (categoryFilter && cat !== categoryFilter) continue
+      if (!byCat.has(cat)) byCat.set(cat, [])
+      byCat.get(cat).push(p)
+    }
+    return [...byCat.entries()]
+  }, [filtered, categoryFilter])
+
+  function toggleCat(cat) { setCollapsed((prev) => ({ ...prev, [cat]: !prev[cat] })) }
+  const isFiltering = Boolean(q.trim() || categoryFilter || onlyTouched)
+  const allCollapsed = grouped.length > 0 && grouped.every(([cat]) => collapsed[cat])
+  function toggleAllCollapsed() {
+    const next = {}
+    if (!allCollapsed) for (const [cat] of grouped) next[cat] = true
+    setCollapsed(next)
+  }
+
+  function setActual(productId, value) {
+    setActuals((prev) => ({ ...prev, [productId]: value }))
+  }
+  function clearActual(productId) {
+    setActuals((prev) => {
+      if (!(productId in prev)) return prev
+      const next = { ...prev }
+      delete next[productId]
+      return next
+    })
+  }
+  function resetAll() { setActuals({}) }
+
+  const touchedCount = Object.keys(actuals).filter((id) => actuals[id] !== '' && actuals[id] !== undefined).length
+
+  async function finish() {
+    const rows = products
+      .filter((p) => hasActual(p.id))
+      .map((p) => ({
+        product_id: p.id,
+        product_name: p.name,
+        unit: p.unit,
+        expected_qty: expectedOf(p.id),
+        actual_qty: Number(actuals[p.id]) || 0,
+      }))
+    if (!rows.length) return
+    setBusy(true)
+    const locationName = locations.find((l) => l.id === locationId)?.name || ''
+    await saveRevision(locationId, locationName, source, rows, note)
+    setBusy(false)
+    setActuals({})
+    setNote('')
+    setToast(`Ревизия сохранена: ${rows.length} позиций`)
+    setTimeout(() => setToast(''), 3000)
+    loadRevisions(locationId, source).then(setHistory)
+  }
+
+  if (!locations.length) return <div className="empty-state">Сначала добавьте хотя бы одну точку.</div>
+  if (!products.length) return <div className="empty-state">Нет товаров для ревизии.</div>
+
+  return (
+    <div>
+      <div className="panel-head-row">
+        <h2>{title || 'Ревизия'}</h2>
+        <div className="panel-head-actions">
+          {grouped.length > 1 && (
+            <button className="btn ghost small" onClick={toggleAllCollapsed}>{allCollapsed ? 'Развернуть всё' : 'Свернуть всё'}</button>
+          )}
+          {touchedCount > 0 && (
+            <button className="btn ghost small" onClick={resetAll}>Сбросить факт</button>
+          )}
+        </div>
+      </div>
+      <div className="hint-explainer">
+        <IconClipboard /> Нажимайте +/− или впишите число только у тех товаров, что пересчитываете —
+        поле по умолчанию показывает учтённый остаток. Остальные товары останутся без изменений.
+        При сохранении разница попадёт в историю, а факт станет новым учётным остатком.
+      </div>
+      <div className="row-form" style={{ marginBottom: 10 }}>
+        {locations.length > 1 && (
+          <select value={locationId} onChange={(e) => setLocationId(e.target.value)}>
+            {locations.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
+          </select>
+        )}
+        <div className="settings-search" style={{ flex: 1 }}>
+          <IconSearch />
+          <input placeholder="Поиск товара..." value={q} onChange={(e) => setQ(e.target.value)} />
+          {q && <button className="search-clear" onClick={() => setQ('')} aria-label="Очистить поиск"><IconClose /></button>}
+        </div>
+      </div>
+      <div className="chip-row">
+        <button className={`chip ${!onlyTouched ? 'active' : ''}`} onClick={() => setOnlyTouched(false)}>Все товары</button>
+        <button className={`chip ${onlyTouched ? 'active' : ''}`} onClick={() => setOnlyTouched(true)}>
+          Только посчитанные {touchedCount > 0 && <span className="chip-count">{touchedCount}</span>}
+        </button>
+      </div>
+      {categoryOptions.length > 1 && (
+        <div className="chip-row">
+          <button className={`chip ${!categoryFilter ? 'active' : ''}`} onClick={() => setCategoryFilter('')}>
+            Все категории <span className="chip-count">{filtered.length}</span>
+          </button>
+          {categoryOptions.map(([cat, count]) => (
+            <button key={cat} className={`chip ${categoryFilter === cat ? 'active' : ''}`} onClick={() => setCategoryFilter(categoryFilter === cat ? '' : cat)}>
+              {cat} <span className="chip-count">{count}</span>
+            </button>
+          ))}
+        </div>
+      )}
+      <div className="product-list">
+        {grouped.length === 0 && (
+          <div className="empty-state"><span className="empty-icon"><IconSearch /></span>Ничего не найдено</div>
+        )}
+        {grouped.map(([cat, list]) => {
+          const isOpen = isFiltering || !collapsed[cat]
+          const touchedInCat = list.filter((p) => hasActual(p.id)).length
+          return (
+            <div className="supplier-group" key={cat}>
+              <button type="button" className="supplier-head" onClick={() => toggleCat(cat)} aria-expanded={isOpen}>
+                <span aria-hidden="true">{categoryIcon(cat)}</span>
+                <span className="supplier-name">{cat}</span>
+                <span className="category-count">{list.length}</span>
+                {touchedInCat > 0 && <span className="category-badge">{touchedInCat} посчитано</span>}
+                <span className={`chevron ${isOpen ? 'open' : ''}`}><IconChevron /></span>
+              </button>
+              {isOpen && (
+                <div className="supplier-body">
+                  {list.map((p) => {
+                    const expected = expectedOf(p.id)
+                    const touched = hasActual(p.id)
+                    const diff = diffOf(p.id)
+                    return (
+                      <div className={`product-row revision-row ${touched ? 'in-cart' : ''}`} key={p.id}>
+                        <div className="product-info">
+                          <div className="name">{p.name}</div>
+                          <div className="revision-expected">Учтено: {expected} {p.unit}</div>
+                        </div>
+                        <div className={`price ${diff === 0 ? '' : diff > 0 ? 'diff-pos' : 'diff-neg'}`}>
+                          {touched ? (diff > 0 ? `+${diff}` : diff) : '—'}
+                        </div>
+                        <div className="stock-cell">
+                          <Stepper qty={displayQty(p.id)} onChange={(v) => setActual(p.id, v)} />
+                          {touched && (
+                            <button type="button" className="search-clear" title="Отменить факт по этому товару" onClick={() => clearActual(p.id)}>
+                              <IconClose />
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+          )
+        })}
+      </div>
+      <div className="row-form" style={{ marginTop: 12 }}>
+        <input placeholder="Комментарий к ревизии (необязательно)" value={note} onChange={(e) => setNote(e.target.value)} style={{ flex: 1 }} />
+        <button className="btn primary" disabled={!touchedCount || busy} onClick={finish}>
+          Сохранить ревизию {touchedCount > 0 && `(${touchedCount})`}
+        </button>
+      </div>
+      {toast && <div className="import-status" style={{ marginTop: 8 }}>{toast}</div>}
+
+      {history.length > 0 && (
+        <div style={{ marginTop: 24 }}>
+          <h3 style={{ margin: '0 0 10px', fontSize: 14, color: 'var(--ink-soft)' }}>История ревизий</h3>
+          <div className="table-scroll">
+            <table className="data-table">
+              <thead><tr><th>Дата</th><th>Позиций</th><th>Суммарная разница</th><th>Комментарий</th></tr></thead>
+              <tbody>
+                {history.map((r) => (
+                  <tr key={r.id}>
+                    <td>{new Date(r.created_at).toLocaleString('ru-RU')}</td>
+                    <td>{r.items_count}</td>
+                    <td className={r.total_diff === 0 ? '' : r.total_diff > 0 ? 'diff-pos' : 'diff-neg'}>
+                      {r.total_diff > 0 ? `+${r.total_diff}` : r.total_diff}
+                    </td>
+                    <td>{r.note || '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// --- Кухня ---------------------------------------------------------------
+// Isolated mini-app: own top bar, own cart, only is_kitchen products, and
+// only Заказ/Остатки/Ревизия — no Настройки, no other products, no
+// suppliers list beyond what's needed to place the kitchen's own order.
+// Isolated per-точка mini-app. `location` is fixed by the PIN that unlocked
+// it (see PinModal / App.openKitchen) — there is deliberately no dropdown to
+// switch to another точка here, so one точка can never see another's data.
+function KitchenApp({ store, theme, toggleTheme, location, onExit }) {
+  const { suppliers, products, locationProducts, settings } = store
+  const [sub, setSub] = useState('order')
+  const locationId = location.id
+  const [query, setQuery] = useState('')
+  const [cart, setCart] = useState([])
+  const [lastOrderInfo, setLastOrderInfo] = useState(null)
+  const [toast, setToast] = useState(null)
+  const toastTimer = useRef(null)
+
+  useEffect(() => {
+    setCart([])
+    setLastOrderInfo(null)
+    if (locationId) store.loadLastOrder(locationId, 'kitchen').then(setLastOrderInfo)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [locationId])
+
+  function showToast(text, type = 'success') {
+    setToast({ text, type })
+    clearTimeout(toastTimer.current)
+    toastTimer.current = setTimeout(() => setToast(null), 2600)
+  }
+
+  const supplierById = useMemo(() => Object.fromEntries(suppliers.map((s) => [s.id, s])), [suppliers])
+  const currentLocation = location
+
+  const kitchenProducts = useMemo(() => {
+    const scoped = locationProducts.filter((lp) => lp.location_id === locationId)
+    const hasScope = scoped.length > 0
+    const scopedIds = new Set(scoped.map((lp) => lp.product_id))
+    const overrideById = Object.fromEntries(scoped.map((lp) => [lp.product_id, lp.price_override]))
+    const maxQtyById = Object.fromEntries(scoped.map((lp) => [lp.product_id, lp.max_qty]))
+    return products
+      .filter((p) => p.is_kitchen)
+      .filter((p) => (hasScope ? scopedIds.has(p.id) : true))
+      .map((p) => ({
+        ...p,
+        effective_price: overrideById[p.id] != null ? overrideById[p.id] : p.price,
+        max_qty: maxQtyById[p.id] != null ? maxQtyById[p.id] : null,
+      }))
+  }, [products, locationProducts, locationId])
+
+  const cartById = useMemo(() => Object.fromEntries(cart.map((it) => [it.product_id, it])), [cart])
+
+  const visibleProducts = useMemo(() => {
+    if (!query.trim()) return kitchenProducts
+    const q = query.trim().toLowerCase()
+    return kitchenProducts.filter((p) => p.name.toLowerCase().includes(q) || (p.category || '').toLowerCase().includes(q))
+  }, [kitchenProducts, query])
+
+  function setQty(product, qty) {
+    let clamped = qty
+    if (product.max_qty != null && clamped > product.max_qty) {
+      clamped = product.max_qty
+      showToast(`Лимит по этой точке: ${product.max_qty} ${product.unit}`, 'info')
+    }
+    qty = clamped
+    const sup = supplierById[product.supplier_id]
+    setCart((prev) => {
+      const idx = prev.findIndex((it) => it.product_id === product.id)
+      if (qty <= 0) {
+        if (idx >= 0) return prev.filter((it) => it.product_id !== product.id)
+        return prev
+      }
+      const row = {
+        product_id: product.id,
+        supplier_id: product.supplier_id,
+        supplier_name: sup?.name || 'Без поставщика',
+        supplier_contact: sup?.contact || '',
+        product_name: product.name,
+        unit: product.unit,
+        price: product.effective_price,
+        payment_note: product.payment_note || sup?.note || '',
+        quantity: qty,
+      }
+      if (idx >= 0) { const next = [...prev]; next[idx] = row; return next }
+      return [...prev, row]
+    })
+  }
+
+  function clearCart() { setCart([]) }
+
+  async function repeatLastOrder() {
+    if (!lastOrderInfo) { showToast('Прошлых закупов кухни по этой точке не найдено', 'info'); return }
+    setCart(lastOrderInfo.items)
+    showToast('Прошлый закуп кухни загружен', 'info')
+  }
+
+  const grandTotal = cart.reduce((s, it) => s + it.quantity * it.price, 0)
+  const groupedCart = useMemo(() => {
+    const map = new Map()
+    for (const it of cart) {
+      if (!map.has(it.supplier_name)) map.set(it.supplier_name, [])
+      map.get(it.supplier_name).push(it)
+    }
+    return [...map.entries()]
+  }, [cart])
+
+  async function handleExport(kind) {
+    if (!cart.length) return
+    const { buildFilename, exportExcel, exportPDF } = await import('./lib/report')
+    const filename = buildFilename(settings.report_filename_template, { locationName: currentLocation?.name ? `${currentLocation.name}-Кухня` : 'Кухня' })
+    const payload = { items: cart, locationName: currentLocation?.name ? `${currentLocation.name} (Кухня)` : 'Кухня', filename, companyName: settings.company_name }
+    if (kind === 'excel') await exportExcel(payload)
+    else exportPDF(payload)
+  }
+
+  function sendSupplierWhatsApp(items) {
+    const digits = phoneToWaDigits(items[0]?.supplier_contact)
+    const text = buildSupplierWaMessage(currentLocation?.name ? `${currentLocation.name}, Кухня` : 'Кухня', items)
+    window.open(`https://wa.me/${digits}?text=${encodeURIComponent(text)}`, '_blank', 'noopener')
+  }
+
+  async function sendSupplierPdfWhatsApp(items) {
+    const { buildFilename, exportPDF } = await import('./lib/report')
+    const filename = buildFilename(settings.report_filename_template, { locationName: currentLocation?.name ? `${currentLocation.name}-Кухня` : 'Кухня' })
+    const file = exportPDF({ items, locationName: currentLocation?.name ? `${currentLocation.name} (Кухня)` : 'Кухня', filename, companyName: settings.company_name, output: 'file' })
+    const digits = phoneToWaDigits(items[0]?.supplier_contact)
+    const text = buildSupplierWaMessage(currentLocation?.name ? `${currentLocation.name}, Кухня` : 'Кухня', items)
+    const result = await sharePdfToWhatsApp(file, text, digits)
+    if (result === 'shared') showToast('Готово — выберите WhatsApp и отправьте', 'success')
+    else if (result === 'downloaded') showToast('PDF скачан, WhatsApp открыт — приложите файл', 'info')
+  }
+
+  async function finishOrder() {
+    if (!cart.length) return
+    if (supabaseReady) {
+      const { data: order } = await supabase
+        .from('orders')
+        .insert({ location_id: locationId, status: 'finished', source: 'kitchen', finished_at: new Date().toISOString() })
+        .select()
+        .single()
+      if (order) {
+        const rows = cart.map((it, i) => ({ order_id: order.id, ...it, sort_order: i }))
+        await supabase.from('order_items').insert(rows)
+      }
+    }
+    await handleExport('excel')
+    showToast('Закуп кухни завершён и сохранён', 'success')
+    clearCart()
+  }
+
+  return (
+    <div className="app-shell kitchen-shell">
+      <div className="topbar">
+        <div className="brand"><span className="dot">●</span> Кухня</div>
+        <div className="kitchen-location-badge" title="Вход выполнен по PIN этой точки — переключиться на другую отсюда нельзя">
+          <IconLocation /> {location.name}
+        </div>
+        <nav>
+          <button className={`tab-btn ${sub === 'order' ? 'active' : ''}`} onClick={() => setSub('order')}>Заказ</button>
+          <button className={`tab-btn ${sub === 'stock' ? 'active' : ''}`} onClick={() => setSub('stock')}>Остатки</button>
+          <button className={`tab-btn ${sub === 'revision' ? 'active' : ''}`} onClick={() => setSub('revision')}>Ревизия</button>
+        </nav>
+        <button type="button" className="theme-toggle" onClick={toggleTheme} aria-label="Переключить тему">
+          {theme === 'dark' ? <IconSun /> : <IconMoon />}
+        </button>
+        <button type="button" className="btn ghost small" onClick={onExit}><IconLock /> Выйти</button>
+      </div>
+
+      {sub === 'order' ? (
+        <div className="main">
+          <div className="panel">
+            <div className="panel-head-row">
+              <h2>Товары {visibleProducts.length > 0 && <span className="category-count">{visibleProducts.length}</span>}</h2>
+              {lastOrderInfo && (
+                <button className="btn ghost small" onClick={repeatLastOrder}><IconRepeat /> Повторить прошлый закуп</button>
+              )}
+            </div>
+            <div className="search-row">
+              <span className="search-icon"><IconSearch /></span>
+              <input placeholder="Поиск товара..." value={query} onChange={(e) => setQuery(e.target.value)} />
+              {query && <button className="search-clear" onClick={() => setQuery('')} aria-label="Очистить поиск"><IconClose /></button>}
+            </div>
+            <div className="product-list">
+              {visibleProducts.length === 0 && (
+                <div className="empty-state">
+                  <span className="empty-icon"><IconSearch /></span>
+                  Кухонных товаров пока нет. Отметьте нужные товары галочкой «Кухня» в Настройках → Товары.
+                </div>
+              )}
+              {visibleProducts.map((p) => {
+                const inCart = cartById[p.id]
+                const qty = inCart ? inCart.quantity : 0
+                return (
+                  <div className={`product-row ${qty > 0 ? 'in-cart' : ''}`} key={p.id}>
+                    <div className="product-info">
+                      <div className="name">{categoryIcon(p.category)} {p.name}</div>
+                      {p.hint && <div className="hint"><IconLink /> {p.hint}</div>}
+                    </div>
+                    <div className="price">{money(p.effective_price)} ₸<span className="unit">/{p.unit}</span></div>
+                    {qty > 0 ? <Stepper qty={qty} onChange={(v) => setQty(p, v)} /> : (
+                      <button className="add-btn" onClick={() => setQty(p, 1)} aria-label="Добавить">+</button>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+          <div className="ticket">
+            <div className="ticket-head">
+              <h2>{currentLocation?.name || 'Точка не выбрана'} · Кухня</h2>
+              <div className="sub">{cart.length ? `${cart.length} позиций` : 'Список пуст'}</div>
+            </div>
+            <div className="ticket-body">
+              {groupedCart.length === 0 && <div className="ticket-empty">Добавьте товары слева.</div>}
+              {groupedCart.map(([supplierName, items]) => (
+                <div className="ticket-group" key={supplierName}>
+                  <div className="ticket-group-head">
+                    <div className="supplier-name">{supplierName}</div>
+                    <div className="ticket-group-actions">
+                      {items[0]?.supplier_contact && (
+                        <button type="button" className="wa-btn" onClick={() => sendSupplierWhatsApp(items)}><IconWhatsApp /> Текст</button>
+                      )}
+                      <button type="button" className="wa-btn" onClick={() => sendSupplierPdfWhatsApp(items)}><IconWhatsApp /> PDF</button>
+                    </div>
+                  </div>
+                  {items.map((it) => (
+                    <div className="ticket-item" key={it.product_id}>
+                      <span className="ti-name">{it.product_name}</span>
+                      <Stepper size="sm" qty={it.quantity} onChange={(v) => setQty({ id: it.product_id, unit: it.unit, max_qty: kitchenProducts.find((p) => p.id === it.product_id)?.max_qty, supplier_id: it.supplier_id, effective_price: it.price, payment_note: it.payment_note, name: it.product_name }, v)} />
+                      <span className="sum">{money(it.quantity * it.price)} ₸</span>
+                    </div>
+                  ))}
+                </div>
+              ))}
+            </div>
+            <div className="ticket-foot">
+              <div className="ticket-total"><span>Итого</span><span>{money(grandTotal)} ₸</span></div>
+              <div className="ticket-actions">
+                <button className="btn" disabled={!cart.length} onClick={() => handleExport('pdf')}>PDF</button>
+                <button className="btn" disabled={!cart.length} onClick={() => handleExport('excel')}>Excel</button>
+              </div>
+              <div className="ticket-actions" style={{ marginTop: 8 }}>
+                <button className="btn" disabled={!cart.length} onClick={clearCart}>Очистить</button>
+                <button className="btn primary" disabled={!cart.length} onClick={finishOrder}>Завершить закуп</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : sub === 'stock' ? (
+        <div className="main" style={{ gridTemplateColumns: '1fr' }}>
+          <div className="panel">
+            <StockTab store={store} locations={[location]} products={products.filter((p) => p.is_kitchen)} title="Остатки кухни" />
+          </div>
+        </div>
+      ) : (
+        <div className="main" style={{ gridTemplateColumns: '1fr' }}>
+          <div className="panel">
+            <RevisionTab store={store} locations={[location]} products={products.filter((p) => p.is_kitchen)} source="kitchen" title="Ревизия кухни" />
+          </div>
+        </div>
+      )}
+
+      {toast && (
+        <div className={`toast toast-${toast.type}`}>
+          <span className="toast-icon">{toast.type === 'success' ? <IconCheck /> : <IconInfo />}</span>
+          <span className="toast-text">{toast.text}</span>
+        </div>
+      )}
     </div>
   )
 }

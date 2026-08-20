@@ -1109,3 +1109,89 @@ table.data-table tr:hover td { background: var(--paper); }
 [data-theme="dark"] .skel { background: linear-gradient(90deg, #1e2330 25%, #262c3c 37%, #1e2330 63%); }
 [data-theme="dark"] .modal-icon { background: var(--bad-soft); }
 [data-theme="dark"] .theme-toggle { color: #ffd98a; }
+
+/* --- Кухня / Лимиты / Остатки / Ревизия -------------------------------- */
+.kitchen-tab { display: inline-flex; align-items: center; gap: 5px; }
+.kitchen-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--ink-soft);
+  white-space: nowrap;
+  padding: 0 6px;
+}
+.kitchen-check input { width: 16px; height: 16px; }
+
+.ticket-group-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+
+.diff-pos { color: #1f8a4c; font-weight: 600; }
+.diff-neg { color: #c23b3b; font-weight: 600; }
+
+.stock-cell { display: flex; align-items: center; gap: 8px; }
+.stock-cell svg { color: #1f8a4c; }
+
+.pin-card { text-align: center; }
+.pin-dots { display: flex; justify-content: center; gap: 14px; margin: 18px 0; }
+.pin-dot {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 2px solid var(--line);
+  display: inline-block;
+}
+.pin-dot.filled { background: var(--accent); border-color: var(--accent); }
+.pin-dots.shake { animation: pin-shake .4s ease; }
+@keyframes pin-shake {
+  0%, 100% { transform: translateX(0); }
+  20% { transform: translateX(-8px); }
+  40% { transform: translateX(8px); }
+  60% { transform: translateX(-6px); }
+  80% { transform: translateX(6px); }
+}
+.pin-pad {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+  max-width: 240px;
+  margin: 0 auto 16px;
+}
+.pin-key {
+  padding: 14px 0;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: var(--paper-raised);
+  color: var(--ink);
+  font-size: 18px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.pin-key:hover { border-color: var(--accent); }
+.pin-key:active { transform: scale(0.95); }
+
+.kitchen-shell .brand { color: var(--accent); }
+
+.kitchen-location-badge {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 100px;
+  background: var(--paper-raised);
+  border: 1px solid var(--line);
+  font-weight: 700;
+  font-size: 13px;
+  color: var(--ink);
+}
+.kitchen-location-badge svg { opacity: 0.7; flex: none; }
+
+.revision-expected {
+  font-size: 12px;
+  color: var(--ink-soft);
+  margin-top: 1px;
+}
+.revision-row .price { font-weight: 700; }
+
+[data-theme="dark"] .diff-pos { color: #6fe3a0; }
+[data-theme="dark"] .diff-neg { color: #ff9a8a; }
+[data-theme="dark"] .pin-key { background: var(--paper-raised); border-color: var(--line); color: var(--ink); }

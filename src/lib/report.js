@@ -201,7 +201,7 @@ const INK = [31, 36, 48]
 const INK_SOFT = [86, 95, 115]
 const LINE = [225, 228, 224]
 
-export function exportPDF({ items, locationName, filename, companyName }) {
+export function exportPDF({ items, locationName, filename, companyName, output = 'save' }) {
   const groups = groupBySupplier(items)
   const doc = new jsPDF({ unit: 'pt', format: 'a4' })
   registerFont(doc)
@@ -295,5 +295,9 @@ export function exportPDF({ items, locationName, filename, companyName }) {
   doc.setTextColor(...INK)
 
   drawFooter()
+
+  if (output === 'blob') return doc.output('blob')
+  if (output === 'file') return new File([doc.output('blob')], `${filename}.pdf`, { type: 'application/pdf' })
+
   doc.save(`${filename}.pdf`)
 }
